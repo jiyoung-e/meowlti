@@ -1,0 +1,944 @@
+#!/bin/zsh
+# SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+# Required Notice: Copyright 2026 jiyoung-e (https://github.com/jiyoung-e/meowlti)
+# meowlti — run Claude / Codex (desktop apps and CLIs) under separate account profiles.
+#
+# Each profile lives in $MEOWLTI_HOME/profiles/<name>/:
+#   desktop/        Claude desktop user-data-dir (login, chats)
+#   claude/         CLAUDE_CONFIG_DIR (Claude Code CLI + desktop Code tab)
+#   codex/          CODEX_HOME (Codex CLI)
+#   codex-desktop/  Codex desktop user-data-dir (experimental)
+#
+# The default accounts (~/.claude, ~/.codex, the normally launched apps) are never touched.
+
+emulate -L zsh
+setopt err_return no_unset pipe_fail extended_glob
+
+MEOWLTI_VERSION=0.1.0
+MEOWLTI_HOME="${MEOWLTI_HOME:-$HOME/.meowlti}"
+PROFILES="$MEOWLTI_HOME/profiles"
+SELF="${0:A}"
+
+# First existing app bundle among the candidates (override with MEOWLTI_CLAUDE_APP / MEOWLTI_CODEX_APP).
+find_app() {
+  local a
+  for a in "$@"; do [[ -d "$a" ]] && { print -r -- "$a"; return 0; }; done
+  print -r -- "$1"
+}
+CLAUDE_APP="${MEOWLTI_CLAUDE_APP:-$(find_app /Applications/Claude.app "$HOME/Applications/Claude.app")}"
+CLAUDE_EXE="$CLAUDE_APP/Contents/MacOS/Claude"
+CLAUDE_TEAM=Q6L2SF6YDW
+CODEX_APP="${MEOWLTI_CODEX_APP:-$(find_app /Applications/ChatGPT.app "$HOME/Applications/ChatGPT.app")}"
+CODEX_EXE="$CODEX_APP/Contents/MacOS/ChatGPT"
+CODEX_TEAM=2DC432GLL2
+
+# Path baked into launcher apps and the status line. Prefer the PATH entry (e.g. /opt/homebrew/bin/meowlti):
+# package managers keep it stable across upgrades, while $SELF points into a versioned directory.
+stable_self() {
+  local p; p="$(whence -p meowlti 2>/dev/null || true)"
+  if [[ -n "$p" && "${p:A}" == "$SELF" ]]; then print -r -- "$p"; else print -r -- "$SELF"; fi
+}
+
+# python3 (with -I). /usr/bin/python3 is only an installer stub until the Command Line Tools exist.
+PY_BIN="${MEOWLTI_PYTHON:-}"
+py() {
+  if [[ -z "$PY_BIN" ]]; then
+    if xcode-select -p >/dev/null 2>&1 && [[ -x /usr/bin/python3 ]]; then PY_BIN=/usr/bin/python3
+    else
+      PY_BIN="$(whence -p python3 2>/dev/null || true)"
+      [[ -n "$PY_BIN" && "$PY_BIN" != /usr/bin/python3 ]] \
+        || die "python3 is required: install the Xcode Command Line Tools (xcode-select --install) or Homebrew python"
+    fi
+  fi
+  "$PY_BIN" -I "$@"
+}
+
+# --json (any position, except for the pass-through commands claude/codex/exec):
+#   data commands print a JSON document; action commands print {"ok":true,"messages":[...]};
+#   errors go to stderr as {"error":"..."} with exit code 1.
+JSON=0
+JSON_DONE=0       # set once a command has printed its own JSON document
+typeset -a MSGS=()
+
+json_str() {
+  local v="$1"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"
+  v="${v//$'\n'/\\n}"; v="${v//$'\t'/\\t}"; v="${v//$'\r'/\\r}"; v="${v//$'\e'/\\u001b}"
+  print -rn -- "\"$v\""
+}
+
+die()  {
+  if (( JSON )); then print -ru2 -- "{\"error\":$(json_str "$*")}"
+  else print -u2 -- "meowlti: $*"; fi
+  exit 1
+}
+info() { if (( JSON )); then MSGS+=("$*"); else print -- "$*"; fi }
+
+# Turn a command's --tsv style output (stdin) into JSON. mode: ls | sessions | bindings | shared
+tsv_to_json() {
+  py -c '
+import json, sys
+mode = sys.argv[1]
+rows = [l.split("\t") for l in sys.stdin.read().splitlines() if l]
+def opt(v): return None if v in ("", "-") else v
+def yn(v): return None if v in ("", "-") else v == "yes"
+out = []
+for c in rows:
+    if mode == "ls":
+        out.append({"name": c[0], "label": opt(c[5]), "email": opt(c[1]),
+                    "desktop_signed_in": c[6] != "-", "desktop_account": opt(c[6]),
+                    "claude_running": c[2] == "running", "codex_running": c[3] == "running",
+                    "claude_cli_logged_in": yn(c[7]), "codex_cli_logged_in": c[4] == "yes"})
+    elif mode == "sessions":
+        out.append({"id": c[0], "title": c[1], "last_activity_ms": int(c[2]), "cwd": opt(c[3]), "source": c[4]})
+    elif mode == "bindings":
+        out.append({"folder": c[0], "profile": c[1]})
+    elif mode == "shared":
+        out.append({"item": c[0], "state": c[1]})
+print(json.dumps(out, ensure_ascii=False, indent=2))' "$1"
+  JSON_DONE=1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: meowlti <command> [args]        (meowlti --version)
+
+Profiles
+  add <name>                    Create a profile and its launcher app
+  rm <name> [--yes]             Move a profile to the Trash (quits its apps first)
+  ls [--tsv] [--cli-auth]       List profiles, accounts and running apps (--cli-auth: also check Claude CLI login)
+  cli-status <name>             Show whether the profile's Claude Code CLI is signed in (yes/no)
+  label <name> [<text>|--clear] Show or set a profile's display name
+
+Desktop apps
+  open <name> [claude|codex]    Launch (or bring to front) the desktop app for a profile
+  quit <name> [claude|codex]    Gracefully quit only that profile's desktop app
+  login <name>                  Route a claude:// login link from the clipboard to the profile's window
+
+CLIs
+  claude <name> [args...]       Run Claude Code with the profile's CLAUDE_CONFIG_DIR
+  codex <name> [args...]        Run Codex CLI with the profile's CODEX_HOME
+
+Sharing (symlink items from ~/.claude or ~/.codex into a profile)
+  share <name> claude|codex <item>...
+  unshare <name> claude|codex <item>...
+  shared <name> claude|codex    List shareable items and whether each is shared
+
+Folder bindings + shell integration
+  bind <profile> [folder] [--file]  Use <profile> for claude/codex in this folder (default: current folder).
+                                --file writes <folder>/.meowlti instead of the meowlti registry
+  unbind [folder]               Remove the folder's own binding
+  which [folder]                Show which profile applies here
+  bindings [profile]            List registry bindings
+  shell-init [zsh|bash]         Print shell functions; use: eval "$(meowlti shell-init zsh)" in ~/.zshrc
+  shell-init --install          Append that line to ~/.zshrc (--status: installed / not-installed)
+  exec claude|codex [args...]   Run the tool with this folder's profile (used by shell-init)
+
+Code sessions (CLI + desktop Code tab)
+  sessions <name>               List a profile's Code sessions (id, title, last activity, cwd)
+  copy-session <from> <id> <to> [--allow-cross-org]
+                                Copy a Code session to another profile to continue it there
+
+Global option
+  --json                        Machine-readable output for agents/scripts (not for claude/codex/exec):
+                                data commands print JSON documents, actions print {"ok":true,"messages":[...]},
+                                errors print {"error":"..."} to stderr and exit 1.
+
+Profile names: lowercase letters, digits and '-', starting with a letter or digit.
+EOF
+}
+
+# ---- helpers -----------------------------------------------------------------
+
+check_name() {
+  [[ "$1" =~ '^[a-z0-9][a-z0-9-]{0,31}$' ]] || die "invalid profile name '$1' (use a-z, 0-9, '-')"
+}
+
+profile_dir() {
+  check_name "$1"
+  local d="$PROFILES/$1"
+  [[ -d "$d" ]] || die "no such profile '$1' (see: meowlti ls)"
+  print -- "$d"
+}
+
+app_kind() {
+  case "${1:-claude}" in
+    claude|codex) print -- "${1:-claude}" ;;
+    *) die "app must be 'claude' or 'codex', got '$1'" ;;
+  esac
+}
+
+# PID of the app instance launched with exactly this user-data-dir.
+# Exact argv comparison — a prefix match would also hit "work2" when looking for "work".
+# PS_SNAPSHOT, when set, is reused instead of calling ps again (cmd_ls checks many profiles).
+PS_SNAPSHOT=""
+
+find_pid() {
+  local exe="$1" data="$2" snapshot
+  # Read ps output fully first: leaving a `ps | while` loop early makes ps die of SIGPIPE.
+  snapshot="${PS_SNAPSHOT:-$(ps -axo pid=,args=)}"
+  local -a match
+  # Exact match on the whole argv. $exe/$data are substituted literally (no ~), so glob chars in paths are safe.
+  match=(${(M)${(f)snapshot}:#[[:space:]]#<->[[:space:]]##$exe --user-data-dir=$data})
+  (( $#match )) && print -- "${${match[1]##[[:space:]]#}%%[[:space:]]*}"
+  return 0
+}
+
+# Make sure a PID really belongs to the expected, properly signed app.
+verify_pid() {
+  local pid="$1" exe="$2" team="$3" app="${2%/Contents/MacOS/*}"
+  [[ "$(ps -p "$pid" -o comm= 2>/dev/null)" == "$exe" ]] || die "PID $pid is not $exe"
+  codesign --verify "$app" 2>/dev/null || die "$app failed signature verification"
+  local sig; sig="$(codesign -dv "$app" 2>&1)"
+  [[ "$sig" == *$'\n'"TeamIdentifier=$team"$'\n'* ]] || die "$app is not signed by the expected developer"
+}
+
+# Send an Apple Event to one process. kind: url | quit | activate
+send_event() {
+  osascript -l JavaScript - "$@" <<'JS'
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  const kind = argv[0], pid = parseInt(argv[1], 10);
+  if (kind === 'activate') {
+    const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+    if (app.isNil()) return 'error: no such process';
+    app.unhide;
+    app.activateWithOptions(3);
+    return 'ok';
+  }
+  const target = $.NSAppleEventDescriptor.descriptorWithProcessIdentifier(pid);
+  let ev;
+  if (kind === 'url') {
+    const GURL = 0x4755524c;
+    ev = $.NSAppleEventDescriptor.appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(GURL, GURL, target, -1, 0);
+    ev.setParamDescriptorForKeyword($.NSAppleEventDescriptor.descriptorWithString(argv[2]), 0x2d2d2d2d);
+  } else if (kind === 'quit') {
+    ev = $.NSAppleEventDescriptor.appleEventWithEventClassEventIDTargetDescriptorReturnIDTransactionID(0x61657674, 0x71756974, target, -1, 0);
+  } else {
+    return 'error: unknown event';
+  }
+  const err = Ref();
+  const reply = ev.sendEventWithOptionsTimeoutError(0x1, 10, err);
+  return reply.isNil() ? 'error: send failed' : 'ok';
+}
+JS
+}
+
+ev_ok() { local out; out="$(send_event "$@")"; [[ "$out" == ok ]] || die "${out#error: }"; }
+
+# Resolve exe / data dir / team / app path for a profile's desktop app.
+desktop_target() {
+  local d="$1" kind="$2"
+  if [[ "$kind" == claude ]]; then
+    reply=("$CLAUDE_EXE" "$d/desktop" "$CLAUDE_TEAM" "$CLAUDE_APP")
+  else
+    reply=("$CODEX_EXE" "$d/codex-desktop" "$CODEX_TEAM" "$CODEX_APP")
+  fi
+}
+
+# Prints "<email>\t<desktop account uuid>", "-" for whichever is unknown.
+# The desktop app keeps no plain-text email — only the account UUID and an encrypted token —
+# so the email shows up once a Code tab session or the CLI has written claude/.claude.json.
+account_info() {
+  py -c '
+import json, sys
+def load(p):
+    try:
+        with open(p) as f: return json.load(f)
+    except Exception:
+        return {}
+email = (load(sys.argv[1]).get("oauthAccount") or {}).get("emailAddress") or "-"
+cfg = load(sys.argv[2])
+signed_in = bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
+uuid = cfg.get("lastKnownAccountUuid") if signed_in else None
+print(f"{email}\t{uuid or chr(45)}")' "$1/claude/.claude.json" "$1/desktop/config.json"
+}
+
+claude_bin() {
+  local b="${MEOWLTI_CLAUDE_BIN:-}"
+  [[ -z "$b" ]] && b="$(command -v claude 2>/dev/null || true)"
+  [[ -z "$b" && -x "$HOME/.local/bin/claude" ]] && b="$HOME/.local/bin/claude"
+  print -- "$b"
+}
+
+# Claude Code CLI login for a profile: yes | no | - (claude not installed).
+# Separate from the desktop login: on macOS the CLI keeps a Keychain entry per CLAUDE_CONFIG_DIR.
+claude_cli_login() {
+  local b; b="$(claude_bin)"
+  [[ -n "$b" ]] || { print -- "-"; return 0; }
+  local out; out="$(CLAUDE_CONFIG_DIR="$1/claude" "$b" auth status 2>/dev/null || true)"
+  [[ "$out" == *'"loggedIn": true'* ]] && print yes || print no
+}
+
+profile_label() {
+  local f="$1/label"
+  [[ -f "$f" ]] && print -r -- "$(<"$f")" || print -- ""
+}
+
+# Items worth sharing from ~/.claude / ~/.codex. Account and session data are never listed.
+SHAREABLE_CLAUDE=(settings.json CLAUDE.md skills agents commands hooks output-styles keybindings.json)
+SHAREABLE_CODEX=(AGENTS.md config.toml prompts skills)
+
+launcher_dir() {
+  if [[ -n "${MEOWLTI_LAUNCHERS:-}" ]]; then print -- "$MEOWLTI_LAUNCHERS"
+  elif [[ -w "$HOME/Applications" ]]; then print -- "$HOME/Applications"
+  else print -- "$MEOWLTI_HOME/launchers"; fi
+}
+
+make_launcher() {
+  local name="$1" dir app
+  dir="$(launcher_dir)"; mkdir -p "$dir"
+  app="$dir/Claude ($name).app"
+  rm -rf "$app"
+  # Bake MEOWLTI_HOME in: apps started from Finder/Dock don't inherit the shell environment.
+  local me; me="$(stable_self)"
+  osacompile -o "$app" -e "do shell script \"MEOWLTI_HOME=\" & quoted form of \"$MEOWLTI_HOME\" & \" \" & quoted form of \"$me\" & \" open $name claude > /dev/null 2>&1 &\"" >/dev/null 2>&1
+  # Reuse Claude's icon so the launcher is recognisable in the Dock / Launchpad.
+  cp "$CLAUDE_APP/Contents/Resources/electron.icns" "$app/Contents/Resources/applet.icns" 2>/dev/null || true
+  touch "$app"
+  print -- "$app"
+}
+
+# ---- commands ----------------------------------------------------------------
+
+cmd_add() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti add <name>"
+  check_name "$name"
+  local d="$PROFILES/$name"
+  [[ -e "$d" ]] && die "profile '$name' already exists"
+  mkdir -p "$d"/{desktop,claude,codex,codex-desktop}
+  chmod 700 "$d"
+  local app; app="$(make_launcher "$name")"
+  info "Created profile '$name' at $d"
+  info "Launcher: $app"
+  info "Next: meowlti open $name   (then sign in with the account for this profile)"
+}
+
+cmd_rm() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti rm <name> [--yes]"
+  local d; d="$(profile_dir "$name")"
+  if [[ "${2:-}" != --yes ]]; then
+    print -n -- "Move profile '$name' (logins, chats, Code sessions) to the Trash? [y/N] "
+    local ans; read -r ans
+    [[ "$ans" == [yY]* ]] || { info "Cancelled."; return 0; }
+  fi
+  local kind
+  for kind in claude codex; do
+    desktop_target "$d" "$kind"
+    [[ -n "$(find_pid "$reply[1]" "$reply[2]")" ]] && cmd_quit "$name" "$kind"
+  done
+  local stamp trash="${MEOWLTI_TRASH:-$HOME/.Trash}"; stamp="$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$trash"
+  mv "$d" "$trash/meowlti-$name-$stamp"
+  rm -rf "$(launcher_dir)/Claude ($name).app"
+  info "Moved to $trash/meowlti-$name-$stamp"
+}
+
+cmd_ls() {
+  # --tsv (used by the menu bar app), one row per profile, no header:
+  #   name  email|-  claude running|stopped  codex running|stopped  codex-cli yes|no  label  desktop-account-uuid|-  claude-cli yes|no|-
+  local tsv=0 cliauth=0 a
+  for a in "$@"; do
+    case "$a" in
+      --tsv) tsv=1 ;;
+      --cli-auth) cliauth=1 ;;
+      *) die "usage: meowlti ls [--tsv] [--cli-auth]" ;;
+    esac
+  done
+  if [[ ! -d "$PROFILES" ]]; then
+    (( tsv )) || info "No profiles yet. Create one with: meowlti add <name>"
+    return 0
+  fi
+  (( tsv )) || printf '%-12s %-16s %-30s %-8s %-11s %-8s %s\n' PROFILE LABEL "CLAUDE ACCOUNT" CLAUDE "CLAUDE CLI" CODEX "CODEX CLI"
+  local d name cl cx email uuid label acct cli ccli
+  PS_SNAPSHOT="$(ps -axo pid=,args=)"
+  for d in "$PROFILES"/*(N/); do
+    name="${d:t}"
+    desktop_target "$d" claude; cl="$(find_pid "$reply[1]" "$reply[2]")"
+    desktop_target "$d" codex;  cx="$(find_pid "$reply[1]" "$reply[2]")"
+    IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
+    label="$(profile_label "$d")"
+    cl="$([[ -n $cl ]] && print running || print stopped)"
+    cx="$([[ -n $cx ]] && print running || print stopped)"
+    cli="$([[ -f $d/codex/auth.json ]] && print yes || print no)"
+    if (( cliauth )); then ccli="$(claude_cli_login "$d")"; else ccli="-"; fi
+    if (( tsv )); then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$email" "$cl" "$cx" "$cli" "$label" "$uuid" "$ccli"
+    else
+      acct="$email"
+      [[ "$acct" == - && "$uuid" != - ]] && acct="signed in"
+      printf '%-12s %-16s %-30s %-8s %-11s %-8s %s\n' "$name" "${label:--}" "$acct" "$cl" "$ccli" "$cx" "$cli"
+    fi
+  done
+}
+
+cmd_label() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti label <name> [<display name>|--clear]"
+  local d; d="$(profile_dir "$name")"; shift
+  if [[ $# -eq 0 ]]; then
+    if (( JSON )); then
+      local l; l="$(profile_label "$d")"
+      print -r -- "{\"name\":$(json_str "$name"),\"label\":$([[ -n $l ]] && json_str "$l" || print -n null)}"
+      JSON_DONE=1
+    else profile_label "$d"; fi
+    return 0
+  fi
+  if [[ "$1" == --clear ]]; then rm -f "$d/label"; info "Cleared display name of '$name'."; return 0; fi
+  local text="$*"
+  text="${text//[$'\t\n\r']/ }"
+  text="${${text##[[:space:]]#}%%[[:space:]]#}"
+  [[ -n "$text" ]] || die "display name is empty"
+  (( ${#text} <= 40 )) || die "display name is longer than 40 characters"
+  print -r -- "$text" > "$d/label"
+  info "Display name of '$name' set to '$text'."
+}
+
+# meowlti shared <name> claude|codex   → "<item>\t<shared|local|off>" for each shareable item that exists
+cmd_shared() {
+  local name="${1:-}" tool="${2:-}"
+  [[ -n "$name" && -n "$tool" ]] || die "usage: meowlti shared <name> claude|codex"
+  local d; d="$(profile_dir "$name")"
+  local src dst items
+  case "$tool" in
+    claude) src="$HOME/.claude"; dst="$d/claude"; items=($SHAREABLE_CLAUDE) ;;
+    codex)  src="$HOME/.codex";  dst="$d/codex";  items=($SHAREABLE_CODEX) ;;
+    *) die "expected 'claude' or 'codex', got '$tool'" ;;
+  esac
+  local item state
+  for item in $items; do
+    [[ -e "$src/$item" ]] || continue
+    if [[ -L "$dst/$item" ]]; then state=shared
+    elif [[ -e "$dst/$item" ]]; then state=local
+    else state=off; fi
+    printf '%s\t%s\n' "$item" "$state"
+  done
+}
+
+cmd_open() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti open <name> [claude|codex]"
+  local d kind; d="$(profile_dir "$name")"; kind="$(app_kind "${2:-}")"
+  desktop_target "$d" "$kind"
+  local exe="$reply[1]" data="$reply[2]" app="$reply[4]"
+  [[ -d "$app" ]] || die "$app is not installed"
+  local pid; pid="$(find_pid "$exe" "$data")"
+  if [[ -n "$pid" ]]; then
+    ev_ok activate "$pid"
+    info "Brought '$name' ($kind) to the front (PID $pid)."
+    return 0
+  fi
+  if [[ "$kind" == claude ]]; then
+    open -n -a "$app" --env "CLAUDE_CONFIG_DIR=$d/claude" --args "--user-data-dir=$data"
+  else
+    info "Note: Codex desktop profiles are experimental."
+    open -n -a "$app" --env "CODEX_HOME=$d/codex" --args "--user-data-dir=$data"
+  fi
+  local i
+  for i in {1..20}; do
+    pid="$(find_pid "$exe" "$data")"; [[ -n "$pid" ]] && break
+    sleep 0.5
+  done
+  [[ -n "$pid" ]] || die "app did not start"
+  info "Opened '$name' ($kind), PID $pid."
+}
+
+cmd_quit() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti quit <name> [claude|codex]"
+  local d kind; d="$(profile_dir "$name")"; kind="$(app_kind "${2:-}")"
+  desktop_target "$d" "$kind"
+  local exe="$reply[1]" data="$reply[2]"
+  local pid; pid="$(find_pid "$exe" "$data")"
+  [[ -n "$pid" ]] || { info "'$name' ($kind) is not running."; return 0; }
+  verify_pid "$pid" "$exe" "$reply[3]"
+  ev_ok quit "$pid"
+  local i
+  for i in {1..40}; do
+    [[ -z "$(find_pid "$exe" "$data")" ]] && { info "Quit '$name' ($kind)."; return 0; }
+    sleep 0.5
+  done
+  die "'$name' ($kind) did not quit within 20s (it may be showing a dialog)"
+}
+
+cmd_login() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti login <name>"
+  local d; d="$(profile_dir "$name")"
+  desktop_target "$d" claude
+  local exe="$reply[1]" data="$reply[2]" team="$reply[3]"
+  local pid; pid="$(find_pid "$exe" "$data")"
+  if [[ -z "$pid" ]]; then cmd_open "$name" claude; pid="$(find_pid "$exe" "$data")"; fi
+  verify_pid "$pid" "$exe" "$team"
+  ev_ok activate "$pid"
+
+  local before; before="$(pbpaste 2>/dev/null || true)"
+  cat <<EOF
+Sign in from the '$name' window now.
+When the browser asks to open Claude, choose Cancel and copy the claude:// link instead.
+Waiting for a claude:// link on the clipboard (5 min, Ctrl-C to stop)...
+EOF
+  local url="" i
+  for i in {1..300}; do
+    url="$(pbpaste 2>/dev/null || true)"
+    if [[ "$url" == claude://* && "$url" != "$before" ]]; then break; fi
+    url=""; sleep 1
+  done
+  [[ -n "$url" ]] || die "timed out waiting for a claude:// link"
+  [[ "$url" != *[[:space:]]* ]] || { printf '' | pbcopy; die "clipboard link contains whitespace; refusing to send"; }
+
+  # Re-check the target right before handing it a one-time auth code.
+  pid="$(find_pid "$exe" "$data")"; [[ -n "$pid" ]] || { printf '' | pbcopy; die "'$name' window closed"; }
+  verify_pid "$pid" "$exe" "$team"
+  local out; out="$(send_event url "$pid" "$url")"
+  printf '' | pbcopy   # don't leave the auth code on the clipboard
+  [[ "$out" == ok ]] || die "failed to deliver the link: ${out#error: }"
+  info "Login link delivered to '$name' (PID $pid). Clipboard cleared."
+}
+
+cmd_cli() {
+  local tool="$1" name="${2:-}"; [[ -n "$name" ]] || die "usage: meowlti $tool <name> [args...]"
+  local d; d="$(profile_dir "$name")"; shift 2
+  export MEOWLTI_PROFILE="$name"
+  if [[ "$tool" == claude ]]; then
+    local -a extra=()
+    # Status line: prepend the profile to whatever status line the profile already has.
+    # Passed with --settings so no settings file is modified; skipped if the caller passes --settings.
+    local me; me="$(stable_self)"
+    if [[ -z "${MEOWLTI_NO_STATUSLINE:-}" && ${@[(I)--settings*]} -eq 0 && "$me" != *[\"\\\']* ]]; then
+      export MEOWLTI_PREV_STATUSLINE="$(statusline_command "$d/claude/settings.json")"
+      extra=(--settings "{\"statusLine\":{\"type\":\"command\",\"command\":\"'$me' statusline\",\"padding\":0}}")
+    fi
+    CLAUDE_CONFIG_DIR="$d/claude" exec claude "${extra[@]}" "$@"
+  else
+    CODEX_HOME="$d/codex" exec codex "$@"
+  fi
+}
+
+# The statusLine command configured in a settings file, if any.
+statusline_command() {
+  [[ -f "$1" ]] || return 0
+  py -c '
+import json, sys
+try:
+    s = json.load(open(sys.argv[1])).get("statusLine") or {}
+    if s.get("type") == "command" and s.get("command"): print(s["command"])
+except Exception:
+    pass' "$1"
+}
+
+# Claude Code runs this with the session JSON on stdin.
+cmd_statusline() {
+  local input; input="$(cat)"
+  local name="${MEOWLTI_PROFILE:-}" tag="meowlti"
+  if [[ -n "$name" && -d "$PROFILES/$name" ]]; then
+    local d="$PROFILES/$name" label email uuid
+    label="$(profile_label "$d")"
+    IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
+    tag="${label:-$name}"
+    [[ "$email" != - ]] && tag+=" · $email"
+  fi
+  local prefix=$'\e[38;5;209m'"🐱 $tag"$'\e[0m'
+  local prev="${MEOWLTI_PREV_STATUSLINE:-}" out=""
+  [[ -n "$prev" ]] && out="$(print -r -- "$input" | /bin/sh -c "$prev" 2>/dev/null || true)"
+  if [[ -z "$out" ]]; then
+    print -r -- "$prefix"
+  else
+    local -a lines=("${(@f)out}")
+    print -r -- "$prefix │ ${lines[1]}"
+    (( ${#lines} > 1 )) && print -r -- "${(F)lines[2,-1]}"
+  fi
+  return 0
+}
+
+# ---- folder bindings ------------------------------------------------------------
+# A folder can be bound to a profile so plain `claude` / `codex` there use it (via shell-init).
+#   registry: $MEOWLTI_HOME/bindings.tsv  ("<abs dir>\t<profile>")  — default, nothing written into the project
+#   file:     <dir>/.meowlti  ("profile=<name>")                     — with --file, travels with the folder
+# The nearest binding walking up from the current folder wins; at the same folder the file wins.
+
+BINDINGS="$MEOWLTI_HOME/bindings.tsv"
+
+abs_dir() {
+  [[ -d "$1" ]] || die "not a folder: $1"
+  print -r -- "${1:A}"
+}
+
+refuse_broad_dir() {
+  [[ "$1" != "/" && "$1" != "${HOME:A}" ]] || die "binding $1 would apply to almost everything; bind a project folder instead"
+}
+
+file_binding() {
+  local f="$1/.meowlti" line
+  [[ -f "$f" ]] || return 1
+  while IFS= read -r line; do
+    if [[ "$line" == profile=* ]]; then print -r -- "${${line#profile=}//[[:space:]]/}"; return 0; fi
+  done < "$f"
+  return 1
+}
+
+registry_binding() {
+  [[ -f "$BINDINGS" ]] || return 1
+  local dir prof
+  while IFS=$'\t' read -r dir prof; do
+    [[ "$dir" == "$1" ]] && { print -r -- "$prof"; return 0; }
+  done < "$BINDINGS"
+  return 1
+}
+
+# Prints "<profile>\t<folder>\t<file|registry>" for the nearest binding, nothing if none.
+resolve_binding() {
+  local dir="${1:A}" prof
+  while true; do
+    if prof="$(file_binding "$dir")"; then printf '%s\t%s\tfile\n' "$prof" "$dir"; return 0; fi
+    if prof="$(registry_binding "$dir")"; then printf '%s\t%s\tregistry\n' "$prof" "$dir"; return 0; fi
+    [[ "$dir" == / ]] && return 0
+    dir="${dir:h}"
+  done
+}
+
+registry_set() {   # registry_set <dir> [profile]  — empty profile removes the entry
+  local dir="$1" prof="${2:-}" tmp
+  mkdir -p "$MEOWLTI_HOME"
+  tmp="$(mktemp "$MEOWLTI_HOME/.bindings.XXXXXX")"
+  if [[ -f "$BINDINGS" ]]; then
+    local d p
+    while IFS=$'\t' read -r d p; do
+      [[ -n "$d" && "$d" != "$dir" ]] && printf '%s\t%s\n' "$d" "$p" >> "$tmp"
+    done < "$BINDINGS"
+  fi
+  [[ -n "$prof" ]] && printf '%s\t%s\n' "$dir" "$prof" >> "$tmp"
+  mv "$tmp" "$BINDINGS"
+}
+
+cmd_bind() {
+  local name="" dir="." mode=registry a
+  for a in "$@"; do
+    case "$a" in
+      --file) mode=file ;;
+      -*) die "usage: meowlti bind <profile> [folder] [--file]" ;;
+      *) if [[ -z "$name" ]]; then name="$a"; else dir="$a"; fi ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: meowlti bind <profile> [folder] [--file]"
+  profile_dir "$name" >/dev/null
+  dir="$(abs_dir "$dir")"; refuse_broad_dir "$dir"
+  if [[ "$mode" == file ]]; then
+    print -r -- "profile=$name" > "$dir/.meowlti"
+    info "Bound $dir to '$name' (wrote $dir/.meowlti — add it to .gitignore if this is a shared repo)."
+  else
+    registry_set "$dir" "$name"
+    info "Bound $dir to '$name'."
+  fi
+}
+
+cmd_unbind() {
+  local dir; dir="$(abs_dir "${1:-.}")"
+  local did=0
+  if registry_binding "$dir" >/dev/null; then registry_set "$dir"; did=1; fi
+  if [[ -f "$dir/.meowlti" ]] && file_binding "$dir" >/dev/null; then rm "$dir/.meowlti"; did=1; fi
+  (( did )) && info "Unbound $dir." || info "$dir has no binding of its own (see: meowlti which)."
+}
+
+cmd_which() {
+  local dir; dir="$(abs_dir "${1:-.}")"
+  local prof bdir kind
+  IFS=$'\t' read -r prof bdir kind <<< "$(resolve_binding "$dir")"
+  if (( JSON )); then
+    if [[ -z "$prof" ]]; then print -r -- "{\"folder\":$(json_str "$dir"),\"profile\":null,\"bound_at\":null,\"via\":null}"
+    else print -r -- "{\"folder\":$(json_str "$dir"),\"profile\":$(json_str "$prof"),\"bound_at\":$(json_str "$bdir"),\"via\":$(json_str "$kind")}"; fi
+    JSON_DONE=1; return 0
+  fi
+  if [[ -z "$prof" ]]; then info "default (no binding for $dir)"; return 0; fi
+  if [[ "$kind" == file ]]; then info "$prof (bound at $bdir by its .meowlti file)"
+  else info "$prof (bound at $bdir)"; fi
+}
+
+# meowlti bindings [profile] → "<folder>\t<profile>" for registry bindings.
+# .meowlti files are not listed: they live in the projects and are found when resolving.
+cmd_bindings() {
+  local filter="${1:-}" dir prof
+  [[ -f "$BINDINGS" ]] || return 0
+  while IFS=$'\t' read -r dir prof; do
+    [[ -z "$filter" || "$prof" == "$filter" ]] && printf '%s\t%s\n' "$dir" "$prof"
+  done < "$BINDINGS"
+  return 0
+}
+
+# Used by the shell functions from shell-init: run the tool with the folder's profile, or unchanged.
+cmd_exec() {
+  local tool="${1:-}"; shift || true
+  [[ "$tool" == claude || "$tool" == codex ]] || die "usage: meowlti exec claude|codex [args...]"
+  local prof bdir kind
+  IFS=$'\t' read -r prof bdir kind <<< "$(resolve_binding "$PWD")"
+  if [[ -z "$prof" ]]; then
+    exec "$tool" "$@"
+  fi
+  [[ -d "$PROFILES/$prof" ]] || die "$bdir is bound to profile '$prof', which does not exist (meowlti unbind ${(q)bdir}, or use: command $tool)"
+  print -u2 -- "meowlti: using profile '$prof' (bound at $bdir)"
+  cmd_cli "$tool" "$prof" "$@"
+}
+
+cmd_shell_init() {
+  local shell_name="${1:-${SHELL:t}}"
+  case "$shell_name" in
+    zsh|bash) ;;
+    --install) shell_install; return ;;
+    --status)
+      local st=not-installed
+      [[ -f "$HOME/.zshrc" ]] && grep -qxF -- 'eval "$(meowlti shell-init zsh)"' "$HOME/.zshrc" && st=installed
+      if (( JSON )); then print -r -- "{\"installed\":$([[ $st == installed ]] && print -n true || print -n false)}"; JSON_DONE=1
+      else print -- "$st"; fi
+      return 0 ;;
+    *) die "usage: meowlti shell-init [zsh|bash] | --install | --status" ;;
+  esac
+  cat <<'SH'
+# meowlti: in a folder bound with `meowlti bind`, run claude/codex with that profile.
+# Bypass with `command claude` / `command codex`.
+claude() { if command -v meowlti >/dev/null 2>&1; then meowlti exec claude "$@"; else command claude "$@"; fi; }
+codex()  { if command -v meowlti >/dev/null 2>&1; then meowlti exec codex "$@";  else command codex "$@";  fi; }
+SH
+}
+
+shell_install() {
+  local rc="$HOME/.zshrc" line='eval "$(meowlti shell-init zsh)"'
+  if [[ -f "$rc" ]] && grep -qxF -- "$line" "$rc"; then
+    info "Already installed in $rc."
+    return 0
+  fi
+  printf '\n# meowlti shell integration\n%s\n' "$line" >> "$rc"
+  info "Added to $rc. Open a new terminal (or run: source ~/.zshrc) to use it."
+}
+
+cmd_share() {
+  local mode="$1" name="${2:-}" tool="${3:-}"
+  [[ -n "$name" && -n "$tool" && $# -ge 4 ]] || die "usage: meowlti $mode <name> claude|codex <item>..."
+  local d; d="$(profile_dir "$name")"; shift 3
+  local src dst
+  case "$tool" in
+    claude) src="$HOME/.claude"; dst="$d/claude" ;;
+    codex)  src="$HOME/.codex";  dst="$d/codex" ;;
+    *) die "expected 'claude' or 'codex', got '$tool'" ;;
+  esac
+  local item
+  for item in "$@"; do
+    [[ "$item" != */* && "$item" != .* ]] || die "item must be a top-level name inside $src, got '$item'"
+    case "$item" in
+      .credentials.json|auth.json|.claude.json|projects|sessions|history.jsonl)
+        die "'$item' holds account or session data and cannot be shared" ;;
+    esac
+    if [[ "$mode" == share ]]; then
+      [[ -e "$src/$item" ]] || die "$src/$item does not exist"
+      if [[ -e "$dst/$item" && ! -L "$dst/$item" ]]; then
+        die "$dst/$item already exists in the profile; move it away first"
+      fi
+      ln -sfn "$src/$item" "$dst/$item"
+      info "Shared $src/$item -> $name"
+    else
+      if [[ -L "$dst/$item" ]]; then rm "$dst/$item"; info "Unshared $item from $name"
+      else info "$item is not shared in $name"; fi
+    fi
+  done
+}
+
+# ---- Code sessions -------------------------------------------------------------
+# A Code session = transcript  claude/projects/<cwd-dir>/<cli-session-id>.jsonl
+#                + (desktop only) desktop/claude-code-sessions/<account>/<org>/local_<id>.json
+# Both the CLI and the desktop Code tab resume from the transcript.
+
+SESSION_PY='
+import json, os, sys, glob, uuid, shutil, time
+
+def load(p):
+    try:
+        with open(p) as f: return json.load(f)
+    except Exception:
+        return {}
+
+def desktop_meta(prof):
+    """cli session id -> (metadata path, metadata) for the desktop Code tab."""
+    out = {}
+    for p in glob.glob(os.path.join(prof, "desktop/claude-code-sessions/*/*/local_*.json")):
+        m = load(p)
+        if m.get("cliSessionId"):
+            out[m["cliSessionId"]] = (p, m)
+    return out
+
+def transcripts(prof):
+    """cli session id -> transcript path."""
+    out = {}
+    for p in glob.glob(os.path.join(prof, "claude/projects/*/*.jsonl")):
+        out[os.path.splitext(os.path.basename(p))[0]] = p
+    return out
+
+def first_prompt(path):
+    try:
+        with open(path) as f:
+            for line in f:
+                try: d = json.loads(line)
+                except Exception: continue
+                if d.get("type") != "user": continue
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+                if isinstance(c, str) and c.strip() and not c.startswith("<"):
+                    return " ".join(c.split())[:60]
+    except Exception:
+        pass
+    return "(untitled)"
+
+def clean(s):
+    return " ".join(str(s).split())
+
+def cmd_list(prof):
+    metas, ts = desktop_meta(prof), transcripts(prof)
+    rows = []
+    for sid, path in ts.items():
+        meta = metas.get(sid, (None, {}))[1]
+        if meta.get("isArchived"): continue
+        title = meta.get("title") or first_prompt(path)
+        when = meta.get("lastActivityAt") or int(os.path.getmtime(path) * 1000)
+        cwd = meta.get("cwd") or "-"
+        rows.append((when, sid, clean(title), cwd, "desktop" if meta else "cli"))
+    for when, sid, title, cwd, kind in sorted(rows, reverse=True):
+        print(f"{sid}\t{title}\t{when}\t{cwd}\t{kind}")
+
+def org_of_target(dst):
+    acct = load(os.path.join(dst, "claude/.claude.json")).get("oauthAccount") or {}
+    cfg = load(os.path.join(dst, "desktop/config.json"))
+    account = cfg.get("lastKnownAccountUuid") if (cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache")) else None
+    return account, acct.get("organizationUuid")
+
+def cmd_copy(src, sid, dst, allow_cross_org):
+    ts = transcripts(src)
+    if sid not in ts: sys.exit(f"no Code session {sid} in this profile")
+    path = ts[sid]
+    meta_path, meta = desktop_meta(src).get(sid, (None, {}))
+    src_org = os.path.basename(os.path.dirname(meta_path)) if meta_path else \
+        (load(os.path.join(src, "claude/.claude.json")).get("oauthAccount") or {}).get("organizationUuid")
+    # account: desktop login (may be None for CLI-only use); dst_org: from the CLI/Code tab account file.
+    account, dst_org = org_of_target(dst)
+    if not dst_org and account:
+        orgs = [os.path.basename(p) for p in glob.glob(os.path.join(dst, "desktop/claude-code-sessions", account, "*")) if os.path.isdir(p)]
+        dst_org = orgs[0] if len(orgs) == 1 else None
+    if not dst_org:
+        sys.exit("cannot tell which account the target profile uses; sign in there first (Claude desktop + one Code tab session, or: meowlti claude <profile> auth login)")
+    if src_org != dst_org and not allow_cross_org:
+        sys.exit("CROSS_ORG: the session belongs to a different organization than the target account; re-run with --allow-cross-org to copy anyway")
+
+    tdir = os.path.join(dst, "claude/projects", os.path.basename(os.path.dirname(path)))
+    os.makedirs(tdir, exist_ok=True)
+    tpath = os.path.join(tdir, sid + ".jsonl")
+    if os.path.exists(tpath): sys.exit("the target profile already has this session")
+    shutil.copy2(path, tpath)
+
+    new_meta = dict(meta) if meta else {}
+    local_id = "local_" + str(uuid.uuid4())
+    now = int(time.time() * 1000)
+    title = meta.get("title") or first_prompt(path)
+    cwd = meta.get("cwd")
+    if not cwd:
+        with open(path) as f:
+            for line in f:
+                try: d = json.loads(line)
+                except Exception: continue
+                if d.get("cwd"): cwd = d["cwd"]; break
+    new_meta.update({
+        "sessionId": local_id, "cliSessionId": sid, "title": title, "titleSource": "user",
+        "cwd": cwd, "originCwd": new_meta.get("originCwd", cwd),
+        "createdAt": now, "lastActivityAt": now, "lastFocusedAt": now, "isArchived": False,
+    })
+    for k in ("toolSurfaceSnapshot", "promptAppendSnapshot", "postTurnSummary", "postTurnSummaryFor"):
+        new_meta.pop(k, None)
+    # Only list it in the desktop Code tab when the target has a desktop login; the CLI needs just the transcript.
+    if account:
+        mdir = os.path.join(dst, "desktop/claude-code-sessions", account, dst_org)
+        os.makedirs(mdir, exist_ok=True)
+        with open(os.path.join(mdir, local_id + ".json"), "w") as f:
+            json.dump(new_meta, f, ensure_ascii=False)
+    kind = "desktop" if account else "cli"
+    print(f"{sid}\t{title}\t{cwd}\t{kind}")
+
+mode = sys.argv[1]
+if mode == "list": cmd_list(sys.argv[2])
+else: cmd_copy(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1")
+'
+
+cmd_sessions() {
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti sessions <name>"
+  local d; d="$(profile_dir "$name")"
+  py -c "$SESSION_PY" list "$d"
+}
+
+cmd_copy_session() {
+  local from="${1:-}" sid="${2:-}" to="${3:-}" flag="${4:-}"
+  [[ -n "$from" && -n "$sid" && -n "$to" ]] || die "usage: meowlti copy-session <from> <session-id> <to> [--allow-cross-org]"
+  [[ "$sid" =~ '^[0-9a-f-]{36}$' ]] || die "invalid session id '$sid'"
+  [[ "$from" != "$to" ]] || die "source and target are the same profile"
+  local src dst; src="$(profile_dir "$from")"; dst="$(profile_dir "$to")"
+  # The desktop app rewrites its session list while running; only touch it while closed.
+  desktop_target "$dst" claude
+  [[ -z "$(find_pid "$reply[1]" "$reply[2]")" ]] || die "quit the '$to' Claude window first (meowlti quit $to)"
+  local out
+  out="$(py -c "$SESSION_PY" copy "$src" "$sid" "$dst" "$([[ $flag == --allow-cross-org ]] && print 1 || print 0)" 2>&1)" \
+    || die "$out"
+  local title cwd kind; IFS=$'\t' read -r _ title cwd kind <<< "$out"
+  info "Copied '$title' to '$to'."
+  if [[ "$kind" == desktop ]]; then
+    info "Continue it in the '$to' Claude window (Code tab), or: cd ${(q)cwd} && meowlti claude $to --resume $sid"
+  else
+    info "Continue it with: cd ${(q)cwd} && meowlti claude $to --resume $sid"
+  fi
+}
+
+# ---- main --------------------------------------------------------------------
+
+[[ $# -ge 1 ]] || { usage; exit 1; }
+# --json may appear anywhere, except after the pass-through commands (their args belong to the tool).
+case "$1" in
+  claude|codex|exec|statusline) ;;
+  *) if (( ${@[(I)--json]} )); then JSON=1; argv=("${(@)argv:#--json}"); fi ;;
+esac
+[[ $# -ge 1 ]] || { usage; exit 1; }
+cmd="$1"; shift
+out=""
+case "$cmd" in
+  add)     cmd_add "$@" ;;
+  rm)      cmd_rm "$@" ;;
+  ls)      if (( JSON )); then out="$(cmd_ls --tsv "$@")" && tsv_to_json ls <<< "$out"; else cmd_ls "$@"; fi ;;
+  label)   cmd_label "$@" ;;
+  cli-status)
+    d="$(profile_dir "${1:-}")" && st="$(claude_cli_login "$d")" && {
+      if (( JSON )); then
+        print -r -- "{\"name\":$(json_str "$1"),\"claude_cli_logged_in\":$(case $st in yes) print -n true;; no) print -n false;; *) print -n null;; esac)}"
+        JSON_DONE=1
+      else print -- "$st"; fi
+    } ;;
+  shared)  if (( JSON )); then out="$(cmd_shared "$@")" && tsv_to_json shared <<< "$out"; else cmd_shared "$@"; fi ;;
+  sessions) if (( JSON )); then out="$(cmd_sessions "$@")" && tsv_to_json sessions <<< "$out"; else cmd_sessions "$@"; fi ;;
+  bind)    cmd_bind "$@" ;;
+  unbind)  cmd_unbind "$@" ;;
+  which)   cmd_which "$@" ;;
+  bindings) if (( JSON )); then out="$(cmd_bindings "$@")" && tsv_to_json bindings <<< "$out"; else cmd_bindings "$@"; fi ;;
+  exec)    cmd_exec "$@" ;;
+  shell-init) cmd_shell_init "$@" ;;
+  statusline) cmd_statusline ;;
+  copy-session) cmd_copy_session "$@" ;;
+  open)    cmd_open "$@" ;;
+  quit)    cmd_quit "$@" ;;
+  login)   cmd_login "$@" ;;
+  claude)  cmd_cli claude "$@" ;;
+  codex)   cmd_cli codex "$@" ;;
+  share)   cmd_share share "$@" ;;
+  unshare) cmd_share unshare "$@" ;;
+  -h|--help|help) usage ;;
+  -v|--version|version)
+    if (( JSON )); then print -r -- "{\"version\":\"$MEOWLTI_VERSION\"}"; JSON_DONE=1
+    else print -- "meowlti $MEOWLTI_VERSION"; fi ;;
+  *) (( JSON )) && die "unknown command '$cmd'"; usage; exit 1 ;;
+esac
+rc=$?
+if (( JSON && rc == 0 && ! JSON_DONE )); then
+  print -rn -- '{"ok":true,"messages":['
+  i=0
+  for m in "${MSGS[@]}"; do (( i++ )) && print -rn -- ','; json_str "$m"; done
+  print -r -- ']}'
+fi
+exit $rc

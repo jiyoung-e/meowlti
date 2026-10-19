@@ -1,0 +1,36 @@
+{
+  "name": "meowlti",
+  "version": "0.1.0",
+  "description": "Run multiple Claude and Codex accounts side by side on one Mac — desktop apps and CLIs",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "multi-account",
+    "profiles",
+    "macos",
+    "cli"
+  ],
+  "homepage": "https://github.com/jiyoung-e/meowlti#readme",
+  "bugs": "https://github.com/jiyoung-e/meowlti/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiyoung-e/meowlti.git"
+  },
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "author": "jiyoung-e",
+  "bin": {
+    "meowlti": "meowlti"
+  },
+  "files": [
+    "meowlti",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "test": "zsh test/smoke.sh"
+  }
+}

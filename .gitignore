@@ -1,0 +1,4 @@
+menubar/build/
+node_modules/
+*.tgz
+.DS_Store

@@ -1,0 +1,28 @@
+class Meowlti < Formula
+  desc "Run multiple Claude and Codex accounts side by side on one Mac"
+  homepage "https://github.com/jiyoung-e/meowlti"
+  url "@URL@"
+  sha256 "@SHA256@"
+  license "PolyForm-Noncommercial-1.0.0"
+
+  depends_on :macos
+
+  def install
+    bin.install "meowlti"
+  end
+
+  def caveats
+    <<~EOS
+      To let plain `claude` / `codex` use the profile bound to the current folder:
+        meowlti shell-init --install
+    EOS
+  end
+
+  test do
+    assert_match "meowlti #{version}", shell_output("#{bin}/meowlti --version")
+    ENV["MEOWLTI_HOME"] = testpath/"home"
+    ENV["MEOWLTI_LAUNCHERS"] = testpath/"launchers"
+    system bin/"meowlti", "add", "demo"
+    assert_match "demo", shell_output("#{bin}/meowlti ls")
+  end
+end
