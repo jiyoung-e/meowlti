@@ -106,6 +106,7 @@ Usage: meowlti <command> [args]        (meowlti --version)
 Profiles
   add <name>                    Create a profile and its launcher app
   rm <name> [--yes]             Move a profile to the Trash (quits its apps first)
+  launcher <name|default>       (Re)create the "Claude (<name>).app" launcher
   ls [--tsv] [--cli-auth]       List profiles, accounts and running apps (--cli-auth: also check Claude CLI login)
   cli-status <name>             Show whether the profile's Claude Code CLI is signed in (yes/no)
   label <name> [<text>|--clear] Show or set a profile's display name
@@ -114,6 +115,8 @@ Desktop apps
   open <name> [claude|codex]    Launch (or bring to front) the desktop app for a profile
   quit <name> [claude|codex]    Gracefully quit only that profile's desktop app
   login <name>                  Route a claude:// login link from the clipboard to the profile's window
+                                <name> may be "default": your normal Claude/Codex (e.g. to reopen it while
+                                profile windows are running — the Dock icon would only raise one of those)
 
 CLIs
   claude <name> [args...]       Run Claude Code with the profile's CLAUDE_CONFIG_DIR
@@ -154,11 +157,22 @@ check_name() {
   [[ "$1" =~ '^[a-z0-9][a-z0-9-]{0,31}$' ]] || die "invalid profile name '$1' (use a-z, 0-9, '-')"
 }
 
+# "default" is the user's normal setup: the normally launched apps, ~/.claude and ~/.codex.
+# Only open / quit / login / ls understand it; DEFAULT_MARK stands in for its profile folder.
+DEFAULT_MARK=":default"
+DEFAULT_CLAUDE_DATA="$HOME/Library/Application Support/Claude"
+
 profile_dir() {
+  [[ "$1" != default ]] || die "'default' is your normal setup (the usual apps, ~/.claude, ~/.codex); it only supports open, quit, login and ls"
   check_name "$1"
   local d="$PROFILES/$1"
   [[ -d "$d" ]] || die "no such profile '$1' (see: meowlti ls)"
   print -- "$d"
+}
+
+# Like profile_dir, but also accepts "default".
+profile_or_default() {
+  if [[ "${1:-}" == default ]]; then print -- "$DEFAULT_MARK"; else profile_dir "$1"; fi
 }
 
 app_kind() {
@@ -178,6 +192,15 @@ find_pid() {
   # Read ps output fully first: leaving a `ps | while` loop early makes ps die of SIGPIPE.
   snapshot="${PS_SNAPSHOT:-$(ps -axo pid=,args=)}"
   local -a match
+  if [[ -z "$data" ]]; then
+    # The default instance: the app started without --user-data-dir (other flags are allowed).
+    local line
+    for line in ${(M)${(f)snapshot}:#[[:space:]]#<->[[:space:]]##$exe(| *)}; do
+      [[ "$line" == *--user-data-dir=* ]] && continue
+      print -- "${${line##[[:space:]]#}%%[[:space:]]*}"; return 0
+    done
+    return 0
+  fi
   # Exact match on the whole argv. $exe/$data are substituted literally (no ~), so glob chars in paths are safe.
   match=(${(M)${(f)snapshot}:#[[:space:]]#<->[[:space:]]##$exe --user-data-dir=$data})
   (( $#match )) && print -- "${${match[1]##[[:space:]]#}%%[[:space:]]*}"
@@ -228,12 +251,15 @@ JS
 ev_ok() { local out; out="$(send_event "$@")"; [[ "$out" == ok ]] || die "${out#error: }"; }
 
 # Resolve exe / data dir / team / app path for a profile's desktop app.
+# For "default" the data dir is empty: the instance started without --user-data-dir.
 desktop_target() {
-  local d="$1" kind="$2"
+  local d="$1" kind="$2" data
   if [[ "$kind" == claude ]]; then
-    reply=("$CLAUDE_EXE" "$d/desktop" "$CLAUDE_TEAM" "$CLAUDE_APP")
+    [[ "$d" == "$DEFAULT_MARK" ]] && data="" || data="$d/desktop"
+    reply=("$CLAUDE_EXE" "$data" "$CLAUDE_TEAM" "$CLAUDE_APP")
   else
-    reply=("$CODEX_EXE" "$d/codex-desktop" "$CODEX_TEAM" "$CODEX_APP")
+    [[ "$d" == "$DEFAULT_MARK" ]] && data="" || data="$d/codex-desktop"
+    reply=("$CODEX_EXE" "$data" "$CODEX_TEAM" "$CODEX_APP")
   fi
 }
 
@@ -252,7 +278,13 @@ email = (load(sys.argv[1]).get("oauthAccount") or {}).get("emailAddress") or "-"
 cfg = load(sys.argv[2])
 signed_in = bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
 uuid = cfg.get("lastKnownAccountUuid") if signed_in else None
-print(f"{email}\t{uuid or chr(45)}")' "$1/claude/.claude.json" "$1/desktop/config.json"
+print(f"{email}\t{uuid or chr(45)}")' "${@[2]:-$1/claude/.claude.json}" "${@[3]:-$1/desktop/config.json}"
+}
+
+# account_info for the default setup. Without CLAUDE_CONFIG_DIR the CLI keeps .claude.json in the home folder;
+# the inherited CLAUDE_CONFIG_DIR is ignored on purpose (meowlti may run inside a profile session).
+default_account_info() {
+  account_info "$DEFAULT_MARK" "$HOME/.claude.json" "$DEFAULT_CLAUDE_DATA/config.json"
 }
 
 claude_bin() {
@@ -268,6 +300,14 @@ claude_cli_login() {
   local b; b="$(claude_bin)"
   [[ -n "$b" ]] || { print -- "-"; return 0; }
   local out; out="$(CLAUDE_CONFIG_DIR="$1/claude" "$b" auth status 2>/dev/null || true)"
+  [[ "$out" == *'"loggedIn": true'* ]] && print yes || print no
+}
+
+# CLI login of the default setup (no CLAUDE_CONFIG_DIR).
+claude_cli_login_default() {
+  local b; b="$(claude_bin)"
+  [[ -n "$b" ]] || { print -- "-"; return 0; }
+  local out; out="$(env -u CLAUDE_CONFIG_DIR "$b" auth status 2>/dev/null || true)"
   [[ "$out" == *'"loggedIn": true'* ]] && print yes || print no
 }
 
@@ -305,11 +345,15 @@ make_launcher() {
 cmd_add() {
   local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti add <name>"
   check_name "$name"
+  [[ "$name" != default ]] || die "'default' is reserved for your normal setup"
   local d="$PROFILES/$name"
   [[ -e "$d" ]] && die "profile '$name' already exists"
   mkdir -p "$d"/{desktop,claude,codex,codex-desktop}
   chmod 700 "$d"
   local app; app="$(make_launcher "$name")"
+  # Once profile windows exist, clicking Claude in the Dock may just raise one of them;
+  # the default launcher always opens (or raises) the normal Claude.
+  [[ -d "$(launcher_dir)/Claude (default).app" ]] || make_launcher default >/dev/null
   info "Created profile '$name' at $d"
   info "Launcher: $app"
   info "Next: meowlti open $name   (then sign in with the account for this profile)"
@@ -346,23 +390,27 @@ cmd_ls() {
       *) die "usage: meowlti ls [--tsv] [--cli-auth]" ;;
     esac
   done
-  if [[ ! -d "$PROFILES" ]]; then
-    (( tsv )) || info "No profiles yet. Create one with: meowlti add <name>"
-    return 0
-  fi
   (( tsv )) || printf '%-12s %-16s %-30s %-8s %-11s %-8s %s\n' PROFILE LABEL "CLAUDE ACCOUNT" CLAUDE "CLAUDE CLI" CODEX "CODEX CLI"
   local d name cl cx email uuid label acct cli ccli
   PS_SNAPSHOT="$(ps -axo pid=,args=)"
-  for d in "$PROFILES"/*(N/); do
-    name="${d:t}"
+  # The default setup comes first, then the profiles.
+  for d in "$DEFAULT_MARK" "$PROFILES"/*(N/); do
     desktop_target "$d" claude; cl="$(find_pid "$reply[1]" "$reply[2]")"
     desktop_target "$d" codex;  cx="$(find_pid "$reply[1]" "$reply[2]")"
-    IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
-    label="$(profile_label "$d")"
+    if [[ "$d" == "$DEFAULT_MARK" ]]; then
+      name=default label=""
+      IFS=$'\t' read -r email uuid <<< "$(default_account_info)"
+      cli="$([[ -f $HOME/.codex/auth.json ]] && print yes || print no)"
+      if (( cliauth )); then ccli="$(claude_cli_login_default)"; else ccli="-"; fi
+    else
+      name="${d:t}"
+      IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
+      label="$(profile_label "$d")"
+      cli="$([[ -f $d/codex/auth.json ]] && print yes || print no)"
+      if (( cliauth )); then ccli="$(claude_cli_login "$d")"; else ccli="-"; fi
+    fi
     cl="$([[ -n $cl ]] && print running || print stopped)"
     cx="$([[ -n $cx ]] && print running || print stopped)"
-    cli="$([[ -f $d/codex/auth.json ]] && print yes || print no)"
-    if (( cliauth )); then ccli="$(claude_cli_login "$d")"; else ccli="-"; fi
     if (( tsv )); then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$email" "$cl" "$cx" "$cli" "$label" "$uuid" "$ccli"
     else
@@ -416,8 +464,8 @@ cmd_shared() {
 }
 
 cmd_open() {
-  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti open <name> [claude|codex]"
-  local d kind; d="$(profile_dir "$name")"; kind="$(app_kind "${2:-}")"
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti open <name|default> [claude|codex]"
+  local d kind; d="$(profile_or_default "$name")"; kind="$(app_kind "${2:-}")"
   desktop_target "$d" "$kind"
   local exe="$reply[1]" data="$reply[2]" app="$reply[4]"
   [[ -d "$app" ]] || die "$app is not installed"
@@ -427,7 +475,10 @@ cmd_open() {
     info "Brought '$name' ($kind) to the front (PID $pid)."
     return 0
   fi
-  if [[ "$kind" == claude ]]; then
+  if [[ "$d" == "$DEFAULT_MARK" ]]; then
+    # -n: a plain `open -a` would only raise an already running profile window.
+    open -n -a "$app"
+  elif [[ "$kind" == claude ]]; then
     open -n -a "$app" --env "CLAUDE_CONFIG_DIR=$d/claude" --args "--user-data-dir=$data"
   else
     info "Note: Codex desktop profiles are experimental."
@@ -443,8 +494,8 @@ cmd_open() {
 }
 
 cmd_quit() {
-  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti quit <name> [claude|codex]"
-  local d kind; d="$(profile_dir "$name")"; kind="$(app_kind "${2:-}")"
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti quit <name|default> [claude|codex]"
+  local d kind; d="$(profile_or_default "$name")"; kind="$(app_kind "${2:-}")"
   desktop_target "$d" "$kind"
   local exe="$reply[1]" data="$reply[2]"
   local pid; pid="$(find_pid "$exe" "$data")"
@@ -460,8 +511,8 @@ cmd_quit() {
 }
 
 cmd_login() {
-  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti login <name>"
-  local d; d="$(profile_dir "$name")"
+  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti login <name|default>"
+  local d; d="$(profile_or_default "$name")"
   desktop_target "$d" claude
   local exe="$reply[1]" data="$reply[2]" team="$reply[3]"
   local pid; pid="$(find_pid "$exe" "$data")"
@@ -902,6 +953,9 @@ out=""
 case "$cmd" in
   add)     cmd_add "$@" ;;
   rm)      cmd_rm "$@" ;;
+  launcher)
+    n="${1:-}"; [[ -n "$n" ]] || die "usage: meowlti launcher <name|default>"
+    profile_or_default "$n" >/dev/null && info "Launcher: $(make_launcher "$n")" ;;
   ls)      if (( JSON )); then out="$(cmd_ls --tsv "$@")" && tsv_to_json ls <<< "$out"; else cmd_ls "$@"; fi ;;
   label)   cmd_label "$@" ;;
   cli-status)

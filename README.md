@@ -67,6 +67,7 @@ if you use the CLI, once with `meowlti claude <name> auth login` (Codex: `meowlt
 | `meowlti ls [--cli-auth]` | Profiles, accounts, running apps (`--cli-auth` also checks Claude CLI login) |
 | `meowlti label <name> [<text>\|--clear]` | Display name shown in lists. The profile id/folder never changes |
 | `meowlti rm <name> [--yes]` | Quit the profile's apps and move its folder to the Trash |
+| `meowlti launcher <name\|default>` | (Re)create the `Claude (<name>).app` launcher |
 
 Profile names use lowercase letters, digits and `-` (max 32 characters).
 
@@ -77,6 +78,12 @@ Profile names use lowercase letters, digits and `-` (max 32 characters).
 | `meowlti open <name> [claude\|codex]` | Launch the desktop app for the profile, or bring its window to the front |
 | `meowlti quit <name> [claude\|codex]` | Quit only that profile's window (graceful, like ⌘Q) |
 | `meowlti login <name>` | Deliver a `claude://` login link to that profile's window (see below) |
+
+**Your normal Claude.** `default` means your usual setup — the apps started without a profile,
+`~/.claude` and `~/.codex`. While profile windows are open, clicking Claude in the Dock may just raise one of
+them, for example after your main Claude quit or crashed. `meowlti open default` (or the `Claude (default).app`
+launcher, made with `meowlti launcher default`) always opens or raises your normal Claude.
+`default` works with `open`, `quit`, `login` and `ls`.
 
 **Signing in to a desktop profile.** macOS sends the `claude://` link at the end of a browser sign-in to whichever
 Claude window started first — usually your main one. Run `meowlti login <name>`, sign in from the profile's window,

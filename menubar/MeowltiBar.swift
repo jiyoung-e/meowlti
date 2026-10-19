@@ -17,7 +17,9 @@ struct Profile: Identifiable, Equatable {
     let codexCLILoggedIn: Bool
     let label: String?
     var id: String { name }
-    var displayName: String { label ?? name }
+    /// "default" is the user's normal Claude/Codex (no profile folder); only open/quit/login apply.
+    var isDefault: Bool { name == "default" }
+    var displayName: String { isDefault ? "기본 (메인)" : (label ?? name) }
 
     var accountSummary: String {
         if let email { return email }
@@ -181,7 +183,9 @@ final class Store: ObservableObject {
     }
 
     func refreshShares() {
-        guard let name = selection else { claudeShares = []; codexShares = []; sessions = []; return }
+        guard let name = selection, name != "default" else {
+            claudeShares = []; codexShares = []; sessions = []; boundFolders = []; claudeCLILogin = nil; return
+        }
         Task.detached {
             let c = Meowlti.shared(name, "claude"), x = Meowlti.shared(name, "codex")
             let s = Meowlti.sessions(name)
@@ -419,7 +423,10 @@ struct ProfileDetail: View {
             Section {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(profile.displayName).font(.title2).fontWeight(.semibold)
-                    Text("프로필 ID: \(profile.name)").font(.caption).foregroundStyle(.secondary)
+                    Text(profile.isDefault
+                         ? "평소에 쓰는 Claude·Codex입니다. 프로필 창이 떠 있어 Dock 아이콘으로 열리지 않을 때 여기서 여세요."
+                         : "프로필 ID: \(profile.name)")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 LabeledContent("계정") {
                     VStack(alignment: .trailing, spacing: 2) {
@@ -449,6 +456,7 @@ struct ProfileDetail: View {
                 LoginRow(store: store, name: profile.name, waiting: waitingLogin)
             }
 
+            if !profile.isDefault {
             Section {
                 LabeledContent("로그인", value: { switch store.claudeCLILogin {
                     case "yes": return "됨"
@@ -461,6 +469,7 @@ struct ProfileDetail: View {
             } footer: {
                 Text("데스크톱 로그인과 별개입니다. 터미널에서 한 번 로그인하세요: meowlti claude \(profile.name) auth login · 실행: meowlti claude \(profile.name)")
                     .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
             }
 
             Section {
@@ -477,10 +486,13 @@ struct ProfileDetail: View {
                 .disabled(busy)
                 LabeledContent("CLI 로그인", value: profile.codexCLILoggedIn ? "됨" : "안 됨")
             } header: {
-                Text("Codex (실험적)")
+                Text(profile.isDefault ? "Codex" : "Codex (실험적)")
             } footer: {
-                Text("CLI 로그인: 터미널에서 meowlti codex \(profile.name) login").font(.caption).foregroundStyle(.secondary)
+                Text(profile.isDefault ? "CLI는 평소처럼 codex로 실행합니다." : "CLI 로그인: 터미널에서 meowlti codex \(profile.name) login")
+                    .font(.caption).foregroundStyle(.secondary)
             }
+
+            if !profile.isDefault {
 
             Section {
                 HStack {
@@ -515,6 +527,7 @@ struct ProfileDetail: View {
                         Text("프로필 삭제…").foregroundStyle(.red)
                     }
                 }
+            }
             }
         }
         .formStyle(.grouped)
@@ -634,7 +647,8 @@ struct SessionsSection: View {
     @State private var pending: (session: CodeSession, to: String)?
     @State private var showAll = false
 
-    private var targets: [Profile] { store.profiles.filter { $0.name != profile.name } }
+    // copy-session works between profiles only; the default setup is not a target.
+    private var targets: [Profile] { store.profiles.filter { $0.name != profile.name && !$0.isDefault } }
     private var shown: [CodeSession] { showAll ? store.sessions : Array(store.sessions.prefix(5)) }
 
     var body: some View {
@@ -847,7 +861,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             sub.addItem(item(p.claudeRunning ? "Claude 앞으로 가져오기" : "Claude 열기", #selector(openClaude), p.name))
             sub.addItem(item("Claude 종료", #selector(quitClaude), p.name, enabled: p.claudeRunning))
             sub.addItem(.separator())
-            sub.addItem(item(p.codexRunning ? "Codex 앞으로 가져오기 (실험적)" : "Codex 열기 (실험적)", #selector(openCodex), p.name))
+            let exp = p.isDefault ? "" : " (실험적)"   // only profile windows of Codex desktop are experimental
+            sub.addItem(item(p.codexRunning ? "Codex 앞으로 가져오기\(exp)" : "Codex 열기\(exp)", #selector(openCodex), p.name))
             sub.addItem(item("Codex 종료", #selector(quitCodex), p.name, enabled: p.codexRunning))
             sub.addItem(.separator())
             sub.addItem(item("설정…", #selector(showProfile), p.name))

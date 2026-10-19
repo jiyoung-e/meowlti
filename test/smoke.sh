@@ -45,7 +45,23 @@ json_ok() {   # json_ok <name> <python expr on d> <command...>
 # --- basics
 expect "version" "meowlti " "$M" --version
 json_ok "version --json" 'd["version"]' "$M" --json --version
-expect "empty ls" "No profiles yet" "$M" ls
+expect "ls shows default" "default" "$M" ls
+expect_fail "default is reserved" "$M" add default
+expect_fail "default rejects profile-only commands" "$M" label default x
+
+# --- finding the default (main) instance among profile instances
+F="$(sed -n '/^find_pid() {/,/^}/p' "$M")"
+CL=/Applications/Claude.app/Contents/MacOS/Claude
+fp() { zsh -c "setopt extended_glob; $F; PS_SNAPSHOT=\$1; find_pid '$CL' \"\$2\"" _ "$1" "$2"; }
+snap_profiles_only="  11 $CL --user-data-dir=/p/work/desktop
+  12 $CL --user-data-dir=/p/dev/desktop"
+[[ -z "$(fp "$snap_profiles_only" "")" ]] && ok "default not found when only profiles run" || bad "default not found when only profiles run"
+[[ "$(fp "$snap_profiles_only
+  13 $CL" "")" == 13 ]] && ok "default found" || bad "default found"
+[[ "$(fp "$snap_profiles_only
+  14 $CL --some-flag" "")" == 14 ]] && ok "default found with extra flags" || bad "default found with extra flags"
+[[ "$(fp "  15 $CL --user-data-dir=/p/work2/desktop
+  16 $CL --user-data-dir=/p/work/desktop" /p/work/desktop)" == 16 ]] && ok "profile match is exact" || bad "profile match is exact"
 
 # --- profiles
 expect "add work" "Created profile 'work'" "$M" add work
@@ -56,7 +72,7 @@ expect_fail "reject bad name" "$M" add "Bad Name"
 expect_fail "reject invisible char" "$M" add $'work '
 expect "label set" "set to 'Company'" "$M" label work "  Company  "
 expect "label trimmed" "Company" "$M" label work
-json_ok "ls --json" 'len(d)==2 and d[1]["label"]=="Company" and d[1]["claude_running"] is False' "$M" --json ls
+json_ok "ls --json" 'd[0]["name"]=="default" and [p["label"] for p in d if p["name"]=="work"]==["Company"] and len(d)==3' "$M" --json ls
 json_ok "error --json" '"error" in d' zsh -c "'$M' --json open nope 2>&1"
 
 # --- sharing
