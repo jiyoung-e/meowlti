@@ -165,6 +165,8 @@ final class Store: ObservableObject {
     @Published var shellInstalled: Bool?
     /// Set when a copy was refused because the accounts are in different organizations.
     @Published var crossOrgRequest: (from: String, session: CodeSession, to: String)?
+    /// Set when both profiles continued the same session separately (copy refused as DIVERGED).
+    @Published var divergedRequest: (from: String, session: CodeSession, to: String, allowCrossOrg: Bool)?
 
     private var loginProcesses: [String: Process] = [:]
     private var timer: Timer?
@@ -206,11 +208,13 @@ final class Store: ObservableObject {
 
     /// Copy a Code session to another profile and open that profile's Claude window.
     /// The target window is quit first because the desktop app rewrites its session list while running.
-    func copySession(from: String, session: CodeSession, to: String, allowCrossOrg: Bool = false) {
+    /// Copying back (A -> B -> A) updates the older copy; if both sides continued, the user may copy it as new.
+    func copySession(from: String, session: CodeSession, to: String, allowCrossOrg: Bool = false, asNew: Bool = false) {
         busy.insert(from)
         let target = profiles.first { $0.name == to }
+        let wasRunning = target?.claudeRunning == true
         Task.detached {
-            if target?.claudeRunning == true {
+            if wasRunning {
                 let q = Meowlti.run(["quit", to, "claude"])
                 if !q.ok {
                     await MainActor.run { self.busy.remove(from); self.notice = (q.message, true) }
@@ -219,17 +223,33 @@ final class Store: ObservableObject {
             }
             var args = ["copy-session", from, session.id, to]
             if allowCrossOrg { args.append("--allow-cross-org") }
+            if asNew { args.append("--as-new") }
             let result = Meowlti.run(args)
-            if result.ok, target?.desktopSignedIn == true { _ = Meowlti.run(["open", to, "claude"]) }
+            // Reopen the target if we closed it, or if there is something new to continue there.
+            if (result.ok && target?.desktopSignedIn == true) || wasRunning { _ = Meowlti.run(["open", to, "claude"]) }
             await MainActor.run {
                 self.busy.remove(from)
                 let toName = target?.displayName ?? to
+                let out = result.output
                 if result.ok {
-                    self.notice = result.output.contains("Code tab")
-                        ? ("'\(session.title)' 세션을 '\(toName)'에 복사하고 Claude 창을 열었습니다. Code 탭 목록에서 이어서 진행하세요.", false)
-                        : ("'\(session.title)' 세션을 '\(toName)'에 복사했습니다. 터미널에서 이어가세요: cd \(session.cwd) && meowlti claude \(to) --resume \(session.id)", false)
-                } else if result.output.contains("CROSS_ORG") {
+                    let where_ = out.contains("Code tab")
+                        ? "'\(toName)' Claude 창의 Code 탭 목록에서 이어서 진행하세요."
+                        : "터미널에서 이어가세요: cd \(session.cwd) && meowlti claude \(to) --resume <세션 ID>"
+                    if out.contains("already has the same") {
+                        self.notice = ("'\(toName)'에 이미 같은 대화가 있습니다. 복사할 내용이 없습니다.", false)
+                    } else if out.contains("newer version") {
+                        self.notice = ("'\(toName)' 쪽 대화가 더 최신이라 복사하지 않았습니다. 반대 방향으로 가져오세요.", false)
+                    } else if out.contains("Updated") {
+                        self.notice = ("'\(toName)'의 '\(session.title)'을(를) 최신 대화로 갱신했습니다. \(where_)", false)
+                    } else if out.contains("separate session") {
+                        self.notice = ("'\(toName)'에 '\(session.title) (copy)'라는 별도 세션으로 복사했습니다. \(where_)", false)
+                    } else {
+                        self.notice = ("'\(session.title)' 세션을 '\(toName)'에 복사했습니다. \(where_)", false)
+                    }
+                } else if out.contains("CROSS_ORG") {
                     self.crossOrgRequest = (from, session, to)
+                } else if out.contains("DIVERGED") {
+                    self.divergedRequest = (from, session, to, allowCrossOrg)
                 } else {
                     self.notice = (result.message, true)
                 }
@@ -682,7 +702,7 @@ struct SessionsSection: View {
         } header: {
             Text("Code 세션")
         } footer: {
-            Text("다른 프로필로 복사해서 그 계정으로 이어갑니다. 원래 세션은 그대로 남습니다. 데스크톱 채팅은 서버에 저장되어 옮길 수 없습니다.")
+            Text("다른 프로필로 복사해서 그 계정으로 이어갑니다. 원래 세션은 그대로 남습니다. 이미 복사한 세션을 다시 보내면 최신 대화로 갱신합니다(A → B → A). 데스크톱 채팅은 서버에 저장되어 옮길 수 없습니다.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .confirmationDialog(confirmTitle, isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } })) {
@@ -705,6 +725,19 @@ struct SessionsSection: View {
             Button("취소", role: .cancel) { store.crossOrgRequest = nil }
         } message: {
             Text("이 세션의 대화 내용(코드, 파일 내용 포함)이 다른 조직의 계정으로 넘어갑니다. 회사 데이터 정책에 맞는지 확인한 뒤 진행하세요.")
+        }
+        .alert("양쪽에서 따로 이어간 세션입니다", isPresented: Binding(
+            get: { store.divergedRequest?.from == profile.name },
+            set: { if !$0 { store.divergedRequest = nil } })) {
+            Button("새 세션으로 복사") {
+                if let r = store.divergedRequest {
+                    store.copySession(from: r.from, session: r.session, to: r.to, allowCrossOrg: r.allowCrossOrg, asNew: true)
+                }
+                store.divergedRequest = nil
+            }
+            Button("취소", role: .cancel) { store.divergedRequest = nil }
+        } message: {
+            Text("이 세션은 두 프로필에서 각각 대화가 진행되어 하나로 합칠 수 없습니다. 덮어쓰면 한쪽 대화가 사라지므로, 대상 프로필에 '(copy)' 이름의 별도 세션으로 복사할 수 있습니다. 원래 세션들은 그대로 남습니다.")
         }
     }
 

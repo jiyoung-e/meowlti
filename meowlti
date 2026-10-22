@@ -153,8 +153,9 @@ Folder bindings + shell integration
 
 Code sessions (CLI + desktop Code tab)
   sessions <name>               List a profile's Code sessions (id, title, last activity, cwd)
-  copy-session <from> <id> <to> [--allow-cross-org]
-                                Copy a Code session to another profile to continue it there
+  copy-session <from> <id> <to> [--allow-cross-org] [--as-new]
+                                Copy a Code session to another profile to continue it there. Copying back
+                                (A -> B -> A) updates the older copy; if both sides continued, use --as-new
 
 Global option
   --json                        Machine-readable output for agents/scripts (not for claude/codex/exec):
@@ -872,7 +873,35 @@ def org_of_target(dst):
     account = cfg.get("lastKnownAccountUuid") if (cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache")) else None
     return account, acct.get("organizationUuid")
 
-def cmd_copy(src, sid, dst, allow_cross_org):
+def read_lines(p):
+    with open(p, "rb") as f:
+        return f.read().splitlines()
+
+def write_meta(dst, account, org, meta, sid, title, cwd, now):
+    """Create (or refresh) the desktop Code tab entry for transcript `sid` in the target profile."""
+    if not account:
+        return
+    mpath, existing = desktop_meta(dst).get(sid, (None, None))
+    if mpath:
+        existing.update({"lastActivityAt": now, "isArchived": False})
+        with open(mpath, "w") as f:
+            json.dump(existing, f, ensure_ascii=False)
+        return
+    new_meta = dict(meta) if meta else {}
+    local_id = "local_" + str(uuid.uuid4())
+    new_meta.update({
+        "sessionId": local_id, "cliSessionId": sid, "title": title, "titleSource": "user",
+        "cwd": cwd, "originCwd": new_meta.get("originCwd", cwd),
+        "createdAt": now, "lastActivityAt": now, "lastFocusedAt": now, "isArchived": False,
+    })
+    for k in ("toolSurfaceSnapshot", "promptAppendSnapshot", "postTurnSummary", "postTurnSummaryFor"):
+        new_meta.pop(k, None)
+    mdir = os.path.join(dst, "desktop/claude-code-sessions", account, org)
+    os.makedirs(mdir, exist_ok=True)
+    with open(os.path.join(mdir, local_id + ".json"), "w") as f:
+        json.dump(new_meta, f, ensure_ascii=False)
+
+def cmd_copy(src, sid, dst, allow_cross_org, as_new):
     ts = transcripts(src)
     if sid not in ts: sys.exit(f"no Code session {sid} in this profile")
     path = ts[sid]
@@ -891,12 +920,6 @@ def cmd_copy(src, sid, dst, allow_cross_org):
 
     tdir = os.path.join(dst, "claude/projects", os.path.basename(os.path.dirname(path)))
     os.makedirs(tdir, exist_ok=True)
-    tpath = os.path.join(tdir, sid + ".jsonl")
-    if os.path.exists(tpath): sys.exit("the target profile already has this session")
-    shutil.copy2(path, tpath)
-
-    new_meta = dict(meta) if meta else {}
-    local_id = "local_" + str(uuid.uuid4())
     now = int(time.time() * 1000)
     title = meta.get("title") or first_prompt(path)
     cwd = meta.get("cwd")
@@ -906,25 +929,51 @@ def cmd_copy(src, sid, dst, allow_cross_org):
                 try: d = json.loads(line)
                 except Exception: continue
                 if d.get("cwd"): cwd = d["cwd"]; break
-    new_meta.update({
-        "sessionId": local_id, "cliSessionId": sid, "title": title, "titleSource": "user",
-        "cwd": cwd, "originCwd": new_meta.get("originCwd", cwd),
-        "createdAt": now, "lastActivityAt": now, "lastFocusedAt": now, "isArchived": False,
-    })
-    for k in ("toolSurfaceSnapshot", "promptAppendSnapshot", "postTurnSummary", "postTurnSummaryFor"):
-        new_meta.pop(k, None)
-    # Only list it in the desktop Code tab when the target has a desktop login; the CLI needs just the transcript.
-    if account:
-        mdir = os.path.join(dst, "desktop/claude-code-sessions", account, dst_org)
-        os.makedirs(mdir, exist_ok=True)
-        with open(os.path.join(mdir, local_id + ".json"), "w") as f:
-            json.dump(new_meta, f, ensure_ascii=False)
     kind = "desktop" if account else "cli"
-    print(f"{sid}\t{title}\t{cwd}\t{kind}")
+    tpath = os.path.join(tdir, sid + ".jsonl")
+
+    if as_new:
+        # A separate copy with its own session id; both histories stay intact.
+        new_sid = str(uuid.uuid4())
+        with open(path, "rb") as fin, open(os.path.join(tdir, new_sid + ".jsonl"), "wb") as fout:
+            for raw in fin:
+                line = raw.rstrip(b"\n")
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    fout.write(raw); continue
+                if isinstance(d, dict) and d.get("sessionId") == sid:
+                    d["sessionId"] = new_sid
+                    line = json.dumps(d, ensure_ascii=False, separators=(",", ":")).encode()
+                fout.write(line + b"\n")
+        write_meta(dst, account, dst_org, meta, new_sid, title + " (copy)", cwd, now)
+        print(f"copied-as-new\t{new_sid}\t{title} (copy)\t{cwd}\t{kind}")
+        return
+
+    if not os.path.exists(tpath):
+        shutil.copy2(path, tpath)
+        write_meta(dst, account, dst_org, meta, sid, title, cwd, now)
+        print(f"copied\t{sid}\t{title}\t{cwd}\t{kind}")
+        return
+
+    # The target already has this session (e.g. A -> B -> back to A). Transcripts are append-only,
+    # so if one is a prefix of the other, the longer one just has more of the same conversation.
+    a, b = read_lines(tpath), read_lines(path)
+    if a == b:
+        print(f"up-to-date\t{sid}\t{title}\t{cwd}\t{kind}")
+    elif b[:len(a)] == a:
+        shutil.copy2(path, tpath)               # fast-forward the target
+        write_meta(dst, account, dst_org, meta, sid, title, cwd, now)
+        print(f"updated\t{sid}\t{title}\t{cwd}\t{kind}")
+    elif a[:len(b)] == b:
+        print(f"target-newer\t{sid}\t{title}\t{cwd}\t{kind}")
+    else:
+        sys.exit("DIVERGED: both profiles continued this session separately; overwriting would lose one side. "
+                 "Re-run with --as-new to copy it as a separate session")
 
 mode = sys.argv[1]
 if mode == "list": cmd_list(sys.argv[2])
-else: cmd_copy(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1")
+else: cmd_copy(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5] == "1", sys.argv[6] == "1")
 '
 
 cmd_sessions() {
@@ -934,8 +983,16 @@ cmd_sessions() {
 }
 
 cmd_copy_session() {
-  local from="${1:-}" sid="${2:-}" to="${3:-}" flag="${4:-}"
-  [[ -n "$from" && -n "$sid" && -n "$to" ]] || die "usage: meowlti copy-session <from> <session-id> <to> [--allow-cross-org]"
+  local from="" sid="" to="" cross=0 asnew=0 a
+  for a in "$@"; do
+    case "$a" in
+      --allow-cross-org) cross=1 ;;
+      --as-new) asnew=1 ;;
+      -*) die "usage: meowlti copy-session <from> <session-id> <to> [--allow-cross-org] [--as-new]" ;;
+      *) if [[ -z "$from" ]]; then from="$a"; elif [[ -z "$sid" ]]; then sid="$a"; else to="$a"; fi ;;
+    esac
+  done
+  [[ -n "$from" && -n "$sid" && -n "$to" ]] || die "usage: meowlti copy-session <from> <session-id> <to> [--allow-cross-org] [--as-new]"
   [[ "$sid" =~ '^[0-9a-f-]{36}$' ]] || die "invalid session id '$sid'"
   [[ "$from" != "$to" ]] || die "source and target are the same profile"
   local src dst; src="$(profile_dir "$from")"; dst="$(profile_dir "$to")"
@@ -943,14 +1000,19 @@ cmd_copy_session() {
   desktop_target "$dst" claude
   [[ -z "$(find_pid "$reply[1]" "$reply[2]")" ]] || die "quit the '$to' Claude window first (meowlti quit $to)"
   local out
-  out="$(py -c "$SESSION_PY" copy "$src" "$sid" "$dst" "$([[ $flag == --allow-cross-org ]] && print 1 || print 0)" 2>&1)" \
-    || die "$out"
-  local title cwd kind; IFS=$'\t' read -r _ title cwd kind <<< "$out"
-  info "Copied '$title' to '$to'."
+  out="$(py -c "$SESSION_PY" copy "$src" "$sid" "$dst" "$cross" "$asnew" 2>&1)" || die "$out"
+  local st nsid title cwd kind; IFS=$'\t' read -r st nsid title cwd kind <<< "$out"
+  case "$st" in
+    copied)        info "Copied '$title' to '$to'." ;;
+    updated)       info "Updated '$title' in '$to' with the newer conversation from '$from'." ;;
+    copied-as-new) info "Copied '$title' to '$to' as a separate session ($nsid)." ;;
+    up-to-date)    info "'$to' already has the same conversation; nothing to do."; return 0 ;;
+    target-newer)  info "'$to' already has a newer version of this session; nothing copied."; return 0 ;;
+  esac
   if [[ "$kind" == desktop ]]; then
-    info "Continue it in the '$to' Claude window (Code tab), or: cd ${(q)cwd} && meowlti claude $to --resume $sid"
+    info "Continue it in the '$to' Claude window (Code tab), or: cd ${(q)cwd} && meowlti claude $to --resume $nsid"
   else
-    info "Continue it with: cd ${(q)cwd} && meowlti claude $to --resume $sid"
+    info "Continue it with: cd ${(q)cwd} && meowlti claude $to --resume $nsid"
   fi
 }
 
