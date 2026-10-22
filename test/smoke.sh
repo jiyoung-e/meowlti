@@ -15,7 +15,7 @@ mkdir -p "$T/bin" "$T/proj/company/sub" "$T/proj/side"
 for tool in claude codex; do
   cat > "$T/bin/$tool" <<EOF
 #!/bin/zsh
-print -r -- "FAKE $tool CLAUDE_CONFIG_DIR=\${CLAUDE_CONFIG_DIR:--} CODEX_HOME=\${CODEX_HOME:--} PROFILE=\${MEOWLTI_PROFILE:--} ARGS=\$*"
+print -r -- "FAKE $tool CLAUDE_CONFIG_DIR=\${CLAUDE_CONFIG_DIR:--} CODEX_HOME=\${CODEX_HOME:--} PROFILE=\${MEOWLTI_PROFILE:--} HOSTEMAIL=\${CLAUDE_CODE_USER_EMAIL:--} USERVAR=\${CLAUDE_CODE_USE_BEDROCK:--} ARGS=\$*"
 EOF
   chmod +x "$T/bin/$tool"
 done
@@ -98,7 +98,13 @@ expect "exec uses profile" "CLAUDE_CONFIG_DIR=$MEOWLTI_HOME/profiles/work/claude
 expect "exec injects status line" "statusLine" zsh -c "cd company && '$M' exec claude x"
 expect "user --settings wins" "ARGS=--settings mine.json" zsh -c "cd company && '$M' exec claude --settings mine.json"
 expect "exec codex uses CODEX_HOME" "CODEX_HOME=$MEOWLTI_HOME/profiles/personal/codex" zsh -c "cd side && '$M' exec codex"
-expect "exec unbound passes through" "CLAUDE_CONFIG_DIR=- CODEX_HOME=- PROFILE=- ARGS=hi" zsh -c "cd '$T' && '$M' exec claude hi"
+expect "exec unbound passes through" "CLAUDE_CONFIG_DIR=- CODEX_HOME=- PROFILE=- " zsh -c "cd '$T' && '$M' exec claude hi"
+# Inside a Claude Code session the host's account variables must not reach the profile's tool...
+expect "host session vars stripped" "HOSTEMAIL=- USERVAR=-" \
+  env CLAUDECODE=1 CLAUDE_CODE_USER_EMAIL=host@example.com CLAUDE_CODE_USE_BEDROCK=1 zsh -c "cd company && '$M' exec claude"
+# ...but in a normal terminal the user's own variables are left alone.
+expect "user vars kept outside a session" "USERVAR=1" \
+  env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_USE_BEDROCK=1 zsh -c "cd company && '$M' exec claude"
 expect "--json after exec goes to tool" "ARGS=--json" zsh -c "cd '$T' && '$M' exec claude --json"
 expect "shell-init zsh" "using profile 'work'" zsh -fc "export PATH='$ROOT:$PATH'; eval \"\$(meowlti shell-init zsh)\"; cd company && claude"
 expect "shell-init bash" "using profile 'personal'" bash -c "export PATH='$ROOT:$PATH'; eval \"\$(meowlti shell-init bash)\"; cd side && codex"

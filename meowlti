@@ -39,6 +39,20 @@ stable_self() {
   if [[ -n "$p" && "${p:A}" == "$SELF" ]]; then print -r -- "$p"; else print -r -- "$SELF"; fi
 }
 
+# When meowlti itself runs inside a Claude Code session (an agent, or the desktop Code tab), the host
+# injects its own account/session variables (CLAUDE_CODE_USER_EMAIL, CLAUDE_CODE_ACCOUNT_UUID, ...).
+# Anything we launch would inherit them and record the *host's* account in the profile, so drop them.
+# Outside such a session (a normal terminal) nothing is touched.
+strip_host_session_env() {
+  [[ -n "${CLAUDECODE:-}" || -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]] || return 0
+  local v
+  for v in ${(k)parameters[(I)CLAUDE_CODE_*]} ${(k)parameters[(I)CLAUDE_AGENT_SDK_*]} \
+           CLAUDECODE CLAUDE_PID CLAUDE_EFFORT CLAUDE_PLUGIN_DATA ${(k)parameters[(I)CLAUDE_PREVIEW_*]} \
+           CODEX_COMPANION_SESSION_ID; do
+    unset "$v" 2>/dev/null || true
+  done
+}
+
 # python3 (with -I). /usr/bin/python3 is only an installer stub until the Command Line Tools exist.
 PY_BIN="${MEOWLTI_PYTHON:-}"
 py() {
@@ -477,7 +491,8 @@ cmd_open() {
   fi
   if [[ "$d" == "$DEFAULT_MARK" ]]; then
     # -n: a plain `open -a` would only raise an already running profile window.
-    open -n -a "$app"
+    # `open` passes our environment on, so a profile's config dir must not leak into the normal app.
+    env -u CLAUDE_CONFIG_DIR -u CODEX_HOME open -n -a "$app"
   elif [[ "$kind" == claude ]]; then
     open -n -a "$app" --env "CLAUDE_CONFIG_DIR=$d/claude" --args "--user-data-dir=$data"
   else
@@ -949,6 +964,7 @@ case "$1" in
 esac
 [[ $# -ge 1 ]] || { usage; exit 1; }
 cmd="$1"; shift
+[[ "$cmd" == statusline ]] || strip_host_session_env
 out=""
 case "$cmd" in
   add)     cmd_add "$@" ;;

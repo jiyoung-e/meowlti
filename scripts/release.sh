@@ -30,6 +30,10 @@ case "$cmd" in
     [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || { print -u2 "working tree is not clean"; exit 1; }
     git -C "$ROOT" rev-parse -q --verify "refs/tags/v$version" >/dev/null || { print -u2 "tag v$version does not exist"; exit 1; }
     zsh "$ROOT/test/smoke.sh" >/dev/null || { print -u2 "tests failed"; exit 1; }
+    # Check exactly what npm would upload for personal information.
+    pkg="$(mktemp -d)"; trap 'rm -rf "$pkg"' EXIT
+    (cd "$ROOT" && npm pack --pack-destination "$pkg" >/dev/null 2>&1) && tar -xzf "$pkg"/*.tgz -C "$pkg"
+    "$ROOT/scripts/check-private.sh" dir "$pkg/package" || exit 1
     (cd "$ROOT" && npm publish --access public)
     ;;
   formula)
@@ -40,6 +44,8 @@ case "$cmd" in
     mkdir -p "$ROOT/packaging/homebrew"
     out="$ROOT/packaging/homebrew/meowlti.rb"
     sed -e "s|@URL@|$url|" -e "s|@SHA256@|$sha|" "$ROOT/packaging/homebrew/meowlti.rb.in" > "$out"
+    mkdir -p "$tmp/src" && tar -xzf "$tmp/src.tar.gz" -C "$tmp/src"
+    "$ROOT/scripts/check-private.sh" dir "$tmp/src" || { rm -f "$out"; exit 1; }
     print "Wrote $out — copy it to Formula/meowlti.rb in github.com/jiyoung-e/homebrew-tap and push."
     ;;
   *) print -u2 "usage: $0 bump|publish|formula <x.y.z>"; exit 1 ;;
