@@ -23,17 +23,36 @@ meowlti bind work ~/company # plain `claude` / `codex` inside ~/company now use 
 
 ## Install
 
-Homebrew:
-
-```sh
-brew install jiyoung-e/tap/meowlti
-```
+### CLI
 
 npm:
 
 ```sh
 npm install -g meowlti
 ```
+
+Straight from GitHub (pick a release tag):
+
+```sh
+npm install -g github:jiyoung-e/meowlti#v0.1.0
+```
+
+Or download the single script and put it on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.0/meowlti -o ~/.local/bin/meowlti && chmod +x ~/.local/bin/meowlti
+```
+
+### Menu bar app (MeowltiBar)
+
+Download `MeowltiBar-<version>.zip` from [Releases](https://github.com/jiyoung-e/meowlti/releases),
+unzip it and move `MeowltiBar.app` to `/Applications`. It is signed and notarized, and needs the `meowlti`
+CLI on your `PATH`.
+
+From 0.1.1 on, MeowltiBar updates itself with [Sparkle](https://sparkle-project.org): it looks at this
+repository's latest release for a newer version (it asks before checking automatically) and you can use
+**업데이트 확인…** in its menu. Updates are verified with an EdDSA signature and Apple's notarization.
+0.1.0 has no updater, so replace it by hand once.
 
 Optional — let plain `claude` / `codex` pick the profile bound to the current folder:
 
@@ -173,16 +192,22 @@ meowlti --json ls
 ## Uninstall
 
 ```sh
-brew uninstall meowlti      # or: npm uninstall -g meowlti
+npm uninstall -g meowlti      # or delete the script you downloaded
 ```
 
-Then remove the `meowlti` lines from `~/.zshrc` and, if you no longer need the profiles, `~/.meowlti`.
+Then delete `/Applications/MeowltiBar.app`, remove the `meowlti` lines from `~/.zshrc` and, if you no longer need the profiles, `~/.meowlti`.
 
 ## Development
 
 ```sh
-zsh test/smoke.sh   # uses a temporary MEOWLTI_HOME and fake claude/codex binaries
+zsh scripts/setup-dev.sh   # new Mac: noreply commit identity, privacy hooks, signing/notary/Sparkle checks
+zsh test/smoke.sh          # uses a temporary MEOWLTI_HOME and fake claude/codex binaries
+menubar/build.sh           # local MeowltiBar build (ad-hoc signed, no updater)
 ```
+
+Releases (on the Mac that holds the signing keys): `scripts/release.sh bump <version>`, commit and tag,
+`menubar/build.sh --release` (signed, notarized app + Sparkle `appcast.xml`), upload both to the GitHub
+release, then `scripts/release.sh publish <version>` for npm.
 
 ## License
 

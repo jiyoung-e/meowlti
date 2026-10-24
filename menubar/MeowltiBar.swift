@@ -5,6 +5,7 @@
 
 import AppKit
 import SwiftUI
+import Sparkle
 
 // MARK: - CLI bridge
 
@@ -850,6 +851,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private let menu = NSMenu()
     let store = Store()
     private var window: NSWindow?
+    /// Sparkle checks GitHub releases for a newer signed build. Only builds that carry the update
+    /// signing key (release builds) start it; local development builds leave it off.
+    let updaterController = SPUStandardUpdaterController(
+        startingUpdater: Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil,
+        updaterDelegate: nil, userDriverDelegate: nil)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = AppIcon.image
@@ -908,6 +914,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         manage.keyEquivalent = ","
         menu.addItem(manage)
         menu.addItem(.separator())
+        if Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil {
+            let update = NSMenuItem(title: "업데이트 확인…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
+                                    keyEquivalent: "")
+            update.target = updaterController
+            update.isEnabled = updaterController.updater.canCheckForUpdates
+            menu.addItem(update)
+        }
         menu.addItem(item("MeowltiBar 종료", #selector(quitApp)))
     }
 
