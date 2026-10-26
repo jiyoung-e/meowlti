@@ -38,7 +38,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
 
 swift_build() {   # swift_build <output> [target]
-  swiftc -O ${2:+-target "$2"} -o "$1" MeowltiBar.swift -framework AppKit -framework SwiftUI \
+  local -a target=()   # zsh keeps ${2:+-target "$2"} as one word, so pass the flag as an array
+  [[ -n "${2:-}" ]] && target=(-target "$2")
+  swiftc -O "${target[@]}" -o "$1" MeowltiBar.swift -framework AppKit -framework SwiftUI \
     -F "$SPARKLE" -framework Sparkle -Xlinker -rpath -Xlinker @executable_path/../Frameworks
 }
 if (( RELEASE )); then
