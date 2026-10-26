@@ -873,9 +873,20 @@ def org_of_target(dst):
     account = cfg.get("lastKnownAccountUuid") if (cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache")) else None
     return account, acct.get("organizationUuid")
 
-def read_lines(p):
+def message_ids(p):
+    """The conversation as a list of message uuids. Claude Code also appends bookkeeping records
+    (last-prompt, cost-state, custom-title, ...) without a uuid whenever a session is opened or
+    closed; those must not count as a different conversation."""
+    ids = []
     with open(p, "rb") as f:
-        return f.read().splitlines()
+        for raw in f:
+            try:
+                d = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(d, dict) and d.get("uuid"):
+                ids.append(d["uuid"])
+    return ids
 
 def write_meta(dst, account, org, meta, sid, title, cwd, now):
     """Create (or refresh) the desktop Code tab entry for transcript `sid` in the target profile."""
@@ -956,9 +967,9 @@ def cmd_copy(src, sid, dst, allow_cross_org, as_new):
         print(f"copied\t{sid}\t{title}\t{cwd}\t{kind}")
         return
 
-    # The target already has this session (e.g. A -> B -> back to A). Transcripts are append-only,
-    # so if one is a prefix of the other, the longer one just has more of the same conversation.
-    a, b = read_lines(tpath), read_lines(path)
+    # The target already has this session (e.g. A -> B -> back to A). The conversation only grows,
+    # so if one message list is a prefix of the other, the longer one just has more of it.
+    a, b = message_ids(tpath), message_ids(path)
     if a == b:
         print(f"up-to-date\t{sid}\t{title}\t{cwd}\t{kind}")
     elif b[:len(a)] == a:

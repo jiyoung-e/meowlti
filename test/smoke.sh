@@ -121,7 +121,7 @@ for p in work personal; do
   print -r -- "{\"oauthAccount\":{\"emailAddress\":\"$p@example.com\",\"organizationUuid\":\"$ORG\"}}" > "$MEOWLTI_HOME/profiles/$p/claude/.claude.json"
 done
 mkdir -p "$MEOWLTI_HOME/profiles/work/claude/projects/-tmp-x" "$MEOWLTI_HOME/profiles/work/desktop/claude-code-sessions/$ACCT/$ORG"
-print -r -- "{\"type\":\"user\",\"cwd\":\"/tmp/x\",\"message\":{\"content\":\"hello there\"}}" > "$MEOWLTI_HOME/profiles/work/claude/projects/-tmp-x/$SID.jsonl"
+print -r -- "{\"type\":\"user\",\"uuid\":\"m1\",\"cwd\":\"/tmp/x\",\"message\":{\"content\":\"hello there\"}}" > "$MEOWLTI_HOME/profiles/work/claude/projects/-tmp-x/$SID.jsonl"
 print -r -- "{\"sessionId\":\"local_x\",\"cliSessionId\":\"$SID\",\"title\":\"Demo\",\"cwd\":\"/tmp/x\",\"lastActivityAt\":1}" \
   > "$MEOWLTI_HOME/profiles/work/desktop/claude-code-sessions/$ACCT/$ORG/local_x.json"
 json_ok "sessions --json" 'd[0]["id"]=="'$SID'" and d[0]["title"]=="Demo"' "$M" --json sessions work
@@ -131,14 +131,18 @@ expect "copied session listed" "$SID" "$M" sessions personal
 # A -> B, continue in B, back to A: the older copy is fast-forwarded.
 PT="$MEOWLTI_HOME/profiles/personal/claude/projects/-tmp-x/$SID.jsonl"
 WT="$MEOWLTI_HOME/profiles/work/claude/projects/-tmp-x/$SID.jsonl"
-print -r -- '{"type":"user","sessionId":"'$SID'","message":{"content":"more from personal"}}' >> "$PT"
+print -r -- '{"type":"user","uuid":"m2","sessionId":"'$SID'","message":{"content":"more from personal"}}' >> "$PT"
 expect "copy back fast-forwards" "Updated 'Demo' in 'work'" "$M" copy-session personal "$SID" work
 cmp -s "$PT" "$WT" && ok "both copies now identical" || bad "both copies now identical"
+# Bookkeeping records (no uuid) that Claude Code appends when a session is opened/closed are not divergence.
+print -r -- '{"type":"last-prompt","sessionId":"'$SID'"}' >> "$WT"
+print -r -- '{"type":"assistant","uuid":"m3","sessionId":"'$SID'","message":{"content":"reply"}}' >> "$PT"
+expect "bookkeeping lines are not divergence" "Updated 'Demo' in 'work'" "$M" copy-session personal "$SID" work
 expect "older source does not overwrite" "already has a newer version" zsh -c "cp '$WT' '$T/old.jsonl'; head -1 '$T/old.jsonl' > '$PT'; '$M' copy-session personal $SID work"
 cp "$WT" "$PT"
 # Both sides continue separately -> refused, unless copied as a new session.
-print -r -- '{"type":"user","sessionId":"'$SID'","message":{"content":"only in work"}}' >> "$WT"
-print -r -- '{"type":"user","sessionId":"'$SID'","message":{"content":"only in personal"}}' >> "$PT"
+print -r -- '{"type":"user","uuid":"w3","sessionId":"'$SID'","message":{"content":"only in work"}}' >> "$WT"
+print -r -- '{"type":"user","uuid":"p3","sessionId":"'$SID'","message":{"content":"only in personal"}}' >> "$PT"
 expect "diverged is refused" "DIVERGED" "$M" copy-session personal "$SID" work
 cmp -s "$WT" "$PT" && bad "diverged left work untouched" || ok "diverged left work untouched"
 expect "--as-new copies separately" "as a separate session" "$M" copy-session personal "$SID" work --as-new

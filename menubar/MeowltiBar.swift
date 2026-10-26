@@ -374,6 +374,7 @@ struct ManagerView: View {
                 HStack {
                     Button { store.showingAdd = true } label: { Label("새 프로필", systemImage: "plus") }
                         .buttonStyle(.borderless)
+                        .accessibilityIdentifier("add-profile")
                     Spacer()
                 }
                 .padding(10)
@@ -409,7 +410,9 @@ struct NoticeBar: View {
             Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .foregroundStyle(isError ? Color.orange : Color.green)
             Text(text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityIdentifier("notice-text")
             Button(action: dismiss) { Image(systemName: "xmark") }.buttonStyle(.borderless)
+                .accessibilityIdentifier("notice-dismiss")
         }
         .padding(10)
         .background((isError ? Color.orange : Color.green).opacity(0.12))
@@ -468,8 +471,10 @@ struct ProfileDetail: View {
                     Button(profile.claudeRunning ? "앞으로 가져오기" : "열기") {
                         store.perform(["open", profile.name, "claude"], for: profile.name)
                     }
+                    .accessibilityIdentifier("claude-open")
                     Button("종료") { store.perform(["quit", profile.name, "claude"], for: profile.name) }
                         .disabled(!profile.claudeRunning)
+                        .accessibilityIdentifier("claude-quit")
                     Spacer()
                     if busy { ProgressView().controlSize(.small) }
                 }
@@ -501,8 +506,10 @@ struct ProfileDetail: View {
                     Button(profile.codexRunning ? "앞으로 가져오기" : "열기") {
                         store.perform(["open", profile.name, "codex"], for: profile.name)
                     }
+                    .accessibilityIdentifier("codex-open")
                     Button("종료") { store.perform(["quit", profile.name, "codex"], for: profile.name) }
                         .disabled(!profile.codexRunning)
+                        .accessibilityIdentifier("codex-quit")
                 }
                 .disabled(busy)
                 LabeledContent("CLI 로그인", value: profile.codexCLILoggedIn ? "됨" : "안 됨")
@@ -519,7 +526,9 @@ struct ProfileDetail: View {
                 HStack {
                     TextField("표시 이름", text: $labelDraft, prompt: Text(profile.name))
                         .onSubmit(saveLabel)
+                        .accessibilityIdentifier("label-field")
                     Button("저장", action: saveLabel)
+                        .accessibilityIdentifier("label-save")
                         .disabled(labelDraft.trimmingCharacters(in: .whitespaces) == (profile.label ?? ""))
                 }
             } header: {
@@ -547,6 +556,7 @@ struct ProfileDetail: View {
                     Button(role: .destructive) { confirmDelete = true } label: {
                         Text("프로필 삭제…").foregroundStyle(.red)
                     }
+                    .accessibilityIdentifier("profile-delete")
                 }
             }
             }
@@ -588,6 +598,7 @@ struct LoginRow: View {
                     Text("로그인 링크를 기다리는 중… (최대 5분)").fontWeight(.medium)
                     Spacer()
                     Button("취소") { store.cancelLogin(name) }
+                        .accessibilityIdentifier("login-cancel")
                 }
                 Text("브라우저가 'Claude 열기'를 물으면 취소를 누르고 claude:// 링크를 복사하세요. 복사하는 즉시 이 프로필 창에만 전달됩니다.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -595,6 +606,7 @@ struct LoginRow: View {
         } else {
             HStack {
                 Button("로그인 링크 전달…") { store.startLogin(name) }
+                    .accessibilityIdentifier("login-relay")
                 Button { showHelp.toggle() } label: { Image(systemName: "questionmark.circle") }
                     .buttonStyle(.borderless)
                     .popover(isPresented: $showHelp) {
@@ -624,10 +636,12 @@ struct FoldersSection: View {
                         store.perform(["unbind", folder], for: profile.name) { store.refreshShares() }
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityIdentifier("folder-unbind")
                 }
             }
             HStack {
                 Button("폴더 추가…", action: chooseFolder)
+                    .accessibilityIdentifier("folder-add")
                 Spacer()
                 if store.shellInstalled == false {
                     Button("터미널 연동 설치") {
@@ -693,6 +707,7 @@ struct SessionsSection: View {
                     }
                     .menuStyle(.borderlessButton)
                     .fixedSize()
+                    .accessibilityIdentifier("session-continue")
                     .disabled(store.busy.contains(profile.name))
                 }
             }
@@ -788,6 +803,7 @@ struct ShareSection: View {
                     }
                 }
                 .disabled(item.state == .local || store.busy.contains(profile.name))
+                .accessibilityIdentifier("share-\(tool)-\(item.name)")
             }
         } header: {
             Text(title)
@@ -818,24 +834,29 @@ struct AddProfileSheet: View {
             Text("새 프로필").font(.title2).fontWeight(.semibold)
             Form {
                 TextField("프로필 ID", text: $name, prompt: Text("예: personal"))
+                    .accessibilityIdentifier("new-id")
                 if let problem {
                     Text(problem).font(.caption).foregroundStyle(.red)
                 } else {
                     Text("폴더 이름으로 쓰이며 나중에 바꿀 수 없습니다.").font(.caption).foregroundStyle(.secondary)
                 }
                 TextField("표시 이름 (선택)", text: $label, prompt: Text("예: 개인 계정"))
+                    .accessibilityIdentifier("new-label")
                 Toggle("만든 뒤 바로 Claude 창 열기", isOn: $openAfter)
+                    .accessibilityIdentifier("new-open-after")
             }
             .formStyle(.grouped)
             HStack {
                 Spacer()
                 Button("취소") { dismiss() }.keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("new-cancel")
                 Button("만들기") {
                     create(name, label, openAfter)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(name.isEmpty || problem != nil)
+                .accessibilityIdentifier("new-create")
             }
         }
         .padding(20)
