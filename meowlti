@@ -82,11 +82,16 @@ json_str() {
 }
 
 die()  {
+  [[ -n "$LOGFILE" ]] && print -r -- "$(date '+%H:%M:%S') ERROR: $*" >> "$LOGFILE"
   if (( JSON )); then print -ru2 -- "{\"error\":$(json_str "$*")}"
   else print -u2 -- "meowlti: $*"; fi
   exit 1
 }
-info() { if (( JSON )); then MSGS+=("$*"); else print -- "$*"; fi }
+LOGFILE=""        # when set (exclusive sign-in), info/die lines are also appended here
+info() {
+  [[ -n "$LOGFILE" ]] && print -r -- "$(date '+%H:%M:%S') $*" >> "$LOGFILE"
+  if (( JSON )); then MSGS+=("$*"); else print -- "$*"; fi
+}
 
 # Turn a command's --tsv style output (stdin) into JSON. mode: ls | sessions | bindings | shared
 tsv_to_json() {
@@ -102,7 +107,8 @@ for c in rows:
         out.append({"name": c[0], "label": opt(c[5]), "email": opt(c[1]),
                     "desktop_signed_in": c[6] != "-", "desktop_account": opt(c[6]),
                     "claude_running": c[2] == "running", "codex_running": c[3] == "running",
-                    "claude_cli_logged_in": yn(c[7]), "codex_cli_logged_in": c[4] == "yes"})
+                    "claude_cli_logged_in": yn(c[7]), "codex_cli_logged_in": c[4] == "yes",
+                    "accounts_differ": len(c) > 8 and c[8] == "yes"})
     elif mode == "sessions":
         out.append({"id": c[0], "title": c[1], "last_activity_ms": int(c[2]), "cwd": opt(c[3]), "source": c[4]})
     elif mode == "bindings":
@@ -128,7 +134,9 @@ Profiles
 Desktop apps
   open <name> [claude|codex]    Launch (or bring to front) the desktop app for a profile
   quit <name> [claude|codex]    Gracefully quit only that profile's desktop app
-  login <name>                  Route a claude:// login link from the clipboard to the profile's window
+  login <name> [--exclusive]    Open the profile's window for sign-in and wait until it is signed in.
+                                Email sign-in works alongside other windows; for Google sign-in use
+                                --exclusive (quits the other Claude windows meanwhile, then reopens them)
                                 <name> may be "default": your normal Claude/Codex (e.g. to reopen it while
                                 profile windows are running — the Dock icon would only raise one of those)
 
@@ -289,11 +297,15 @@ def load(p):
         with open(p) as f: return json.load(f)
     except Exception:
         return {}
-email = (load(sys.argv[1]).get("oauthAccount") or {}).get("emailAddress") or "-"
+acct = load(sys.argv[1]).get("oauthAccount") or {}
+email = acct.get("emailAddress") or "-"
 cfg = load(sys.argv[2])
 signed_in = bool(cfg.get("oauth:tokenCacheV2") or cfg.get("oauth:tokenCache"))
 uuid = cfg.get("lastKnownAccountUuid") if signed_in else None
-print(f"{email}\t{uuid or chr(45)}")' "${@[2]:-$1/claude/.claude.json}" "${@[3]:-$1/desktop/config.json}"
+# The CLI (or Code tab) account can differ from the desktop login if the CLI signed in with
+# another account; then one profile mixes two accounts in the same config dir.
+differ = "yes" if (uuid and acct.get("accountUuid") and acct["accountUuid"] != uuid) else "no"
+print(f"{email}\t{uuid or chr(45)}\t{differ}")' "${@[2]:-$1/claude/.claude.json}" "${@[3]:-$1/desktop/config.json}"
 }
 
 # account_info for the default setup. Without CLAUDE_CONFIG_DIR the CLI keeps .claude.json in the home folder;
@@ -396,7 +408,7 @@ cmd_rm() {
 
 cmd_ls() {
   # --tsv (used by the menu bar app), one row per profile, no header:
-  #   name  email|-  claude running|stopped  codex running|stopped  codex-cli yes|no  label  desktop-account-uuid|-  claude-cli yes|no|-
+  #   name  email|-  claude running|stopped  codex running|stopped  codex-cli yes|no  label  desktop-account-uuid|-  claude-cli yes|no|-  accounts-differ yes|no
   local tsv=0 cliauth=0 a
   for a in "$@"; do
     case "$a" in
@@ -406,20 +418,22 @@ cmd_ls() {
     esac
   done
   (( tsv )) || printf '%-12s %-16s %-30s %-8s %-11s %-8s %s\n' PROFILE LABEL "CLAUDE ACCOUNT" CLAUDE "CLAUDE CLI" CODEX "CODEX CLI"
-  local d name cl cx email uuid label acct cli ccli
-  PS_SNAPSHOT="$(ps -axo pid=,args=)"
+  local d name cl cx email uuid differ label acct cli ccli
+  local -a mixed=()
+  # Snapshot for this listing only (local, so later find_pid calls see live processes again).
+  local PS_SNAPSHOT; PS_SNAPSHOT="$(ps -axo pid=,args=)"
   # The default setup comes first, then the profiles.
   for d in "$DEFAULT_MARK" "$PROFILES"/*(N/); do
     desktop_target "$d" claude; cl="$(find_pid "$reply[1]" "$reply[2]")"
     desktop_target "$d" codex;  cx="$(find_pid "$reply[1]" "$reply[2]")"
     if [[ "$d" == "$DEFAULT_MARK" ]]; then
       name=default label=""
-      IFS=$'\t' read -r email uuid <<< "$(default_account_info)"
+      IFS=$'\t' read -r email uuid differ <<< "$(default_account_info)"
       cli="$([[ -f $HOME/.codex/auth.json ]] && print yes || print no)"
       if (( cliauth )); then ccli="$(claude_cli_login_default)"; else ccli="-"; fi
     else
       name="${d:t}"
-      IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
+      IFS=$'\t' read -r email uuid differ <<< "$(account_info "$d")"
       label="$(profile_label "$d")"
       cli="$([[ -f $d/codex/auth.json ]] && print yes || print no)"
       if (( cliauth )); then ccli="$(claude_cli_login "$d")"; else ccli="-"; fi
@@ -427,13 +441,16 @@ cmd_ls() {
     cl="$([[ -n $cl ]] && print running || print stopped)"
     cx="$([[ -n $cx ]] && print running || print stopped)"
     if (( tsv )); then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$email" "$cl" "$cx" "$cli" "$label" "$uuid" "$ccli"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$email" "$cl" "$cx" "$cli" "$label" "$uuid" "$ccli" "$differ"
     else
       acct="$email"
       [[ "$acct" == - && "$uuid" != - ]] && acct="signed in"
+      [[ "$differ" == yes ]] && { acct="$acct ⚠"; mixed+=("$name"); }
       printf '%-12s %-16s %-30s %-8s %-11s %-8s %s\n' "$name" "${label:--}" "$acct" "$cl" "$ccli" "$cx" "$cli"
     fi
   done
+  (( ${#mixed} )) && print -- "\n⚠ ${(j:, :)mixed}: the CLI / Code tab account differs from the desktop login (one profile, two accounts)."
+  return 0
 }
 
 cmd_label() {
@@ -490,22 +507,33 @@ cmd_open() {
     info "Brought '$name' ($kind) to the front (PID $pid)."
     return 0
   fi
-  if [[ "$d" == "$DEFAULT_MARK" ]]; then
-    # -n: a plain `open -a` would only raise an already running profile window.
-    # `open` passes our environment on, so a profile's config dir must not leak into the normal app.
-    env -u CLAUDE_CONFIG_DIR -u CODEX_HOME open -n -a "$app"
-  elif [[ "$kind" == claude ]]; then
-    open -n -a "$app" --env "CLAUDE_CONFIG_DIR=$d/claude" --args "--user-data-dir=$data"
-  else
-    info "Note: Codex desktop profiles are experimental."
-    open -n -a "$app" --env "CODEX_HOME=$d/codex" --args "--user-data-dir=$data"
-  fi
-  local i
-  for i in {1..20}; do
-    pid="$(find_pid "$exe" "$data")"; [[ -n "$pid" ]] && break
-    sleep 0.5
+  [[ "$kind" == codex && "$d" != "$DEFAULT_MARK" ]] && info "Note: Codex desktop profiles are experimental."
+  # LaunchServices can refuse a launch right after the same app quit (e.g. while it re-registers the
+  # bundle), so retry a few times and only report success once the instance has stayed up.
+  local attempt i
+  for attempt in 1 2 3; do
+    if [[ "$d" == "$DEFAULT_MARK" ]]; then
+      # -n: a plain `open -a` would only raise an already running profile window.
+      # `open` passes our environment on, so a profile's config dir must not leak into the normal app.
+      env -u CLAUDE_CONFIG_DIR -u CODEX_HOME open -n -a "$app" 2>/dev/null || true
+    elif [[ "$kind" == claude ]]; then
+      open -n -a "$app" --env "CLAUDE_CONFIG_DIR=$d/claude" --args "--user-data-dir=$data" 2>/dev/null || true
+    else
+      open -n -a "$app" --env "CODEX_HOME=$d/codex" --args "--user-data-dir=$data" 2>/dev/null || true
+    fi
+    pid=""
+    for i in {1..20}; do
+      pid="$(find_pid "$exe" "$data")"; [[ -n "$pid" ]] && break
+      sleep 0.5
+    done
+    if [[ -n "$pid" ]]; then
+      sleep 2
+      [[ -n "$(find_pid "$exe" "$data")" ]] && break
+      pid=""
+    fi
+    (( attempt < 3 )) && sleep 2
   done
-  [[ -n "$pid" ]] || die "app did not start"
+  [[ -n "$pid" ]] || die "'$name' ($kind) did not start after 3 attempts — try: meowlti open $name${2:+ $2}"
   info "Opened '$name' ($kind), PID $pid."
 }
 
@@ -526,38 +554,119 @@ cmd_quit() {
   die "'$name' ($kind) did not quit within 20s (it may be showing a dialog)"
 }
 
+# Is the profile's desktop app signed in? (the desktop app keeps an encrypted token in config.json)
+desktop_signed_in() {   # desktop_signed_in <profile dir | DEFAULT_MARK>
+  local cfg
+  if [[ "$1" == "$DEFAULT_MARK" ]]; then cfg="$DEFAULT_CLAUDE_DATA/config.json"; else cfg="$1/desktop/config.json"; fi
+  [[ -f "$cfg" ]] || return 1
+  py -c '
+import json, sys
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if (c.get("oauth:tokenCacheV2") or c.get("oauth:tokenCache")) else 1)' "$cfg"
+}
+
+# True when this process runs inside a Claude desktop app (e.g. its Code tab): quitting that app would kill us.
+inside_claude_app() {
+  local p=$$ comm
+  for _ in {1..40}; do
+    comm="$(ps -o comm= -p "$p" 2>/dev/null)" || return 1
+    [[ "$comm" == */Claude.app/* ]] && return 0
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    [[ -z "$p" || "$p" == 0 || "$p" == 1 ]] && return 1
+  done
+  return 1
+}
+
+# meowlti login <name|default> [--exclusive]
+#   Email sign-in works while other Claude windows run. Google sign-in returns through a claude:// link,
+#   which macOS hands to the normal (first) Claude window — so --exclusive quits the other Claude windows
+#   while you sign in and reopens them afterwards. A claude:// link copied to the clipboard is still relayed.
 cmd_login() {
-  local name="${1:-}"; [[ -n "$name" ]] || die "usage: meowlti login <name|default>"
+  local name="" exclusive=0 a
+  for a in "$@"; do
+    case "$a" in
+      --exclusive) exclusive=1 ;;
+      -*) die "usage: meowlti login <name|default> [--exclusive]" ;;
+      *) name="$a" ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: meowlti login <name|default> [--exclusive]"
   local d; d="$(profile_or_default "$name")"
   desktop_target "$d" claude
   local exe="$reply[1]" data="$reply[2]" team="$reply[3]"
+  if desktop_signed_in "$d"; then
+    info "'$name' is already signed in. To use another account, sign out in its window first."
+    return 0
+  fi
+
+  local -a reopen=()
+  if (( exclusive )); then
+    # Keep a record of exclusive sign-ins (they close and reopen windows) for troubleshooting.
+    mkdir -p "$MEOWLTI_HOME/logs"
+    LOGFILE="$MEOWLTI_HOME/logs/login-$(date +%Y%m%d-%H%M%S)-$name.log"
+    info "exclusive sign-in for '$name' started $(date '+%Y-%m-%d %H:%M:%S')"
+    inside_claude_app && die "--exclusive quits your other Claude windows, including the one running this command; run it from Terminal or MeowltiBar"
+    local row nm st
+    for row in "${(@f)$(cmd_ls --tsv)}"; do
+      nm="${row%%$'\t'*}"; st="$(print -r -- "$row" | cut -f3)"
+      [[ "$nm" != "$name" && "$st" == running ]] && reopen+=("$nm")
+    done
+    for nm in $reopen; do cmd_quit "$nm" claude >/dev/null || { info "could not quit '$nm'; reopening"; break; }; done
+    for nm in $reopen; do
+      desktop_target "$(profile_or_default "$nm")" claude
+      [[ -z "$(find_pid "$reply[1]" "$reply[2]")" ]] || { for nm in $reopen; do cmd_open "$nm" claude >/dev/null; done; die "could not quit the other Claude windows"; }
+    done
+    desktop_target "$d" claude
+    (( ${#reopen} )) && info "Closed for now: ${(j:, :)reopen} (reopened after sign-in)."
+    # Ctrl-C / cancel from MeowltiBar must still bring the closed windows back.
+    setopt local_traps
+    trap 'for nm in $reopen; do cmd_open "$nm" claude >/dev/null; done; die "sign-in cancelled; reopened: ${(j:, :)reopen}"' INT TERM
+  fi
+
   local pid; pid="$(find_pid "$exe" "$data")"
-  if [[ -z "$pid" ]]; then cmd_open "$name" claude; pid="$(find_pid "$exe" "$data")"; fi
+  if [[ -z "$pid" ]]; then cmd_open "$name" claude >/dev/null; pid="$(find_pid "$exe" "$data")"; fi
   verify_pid "$pid" "$exe" "$team"
   ev_ok activate "$pid"
 
-  local before; before="$(pbpaste 2>/dev/null || true)"
-  cat <<EOF
-Sign in from the '$name' window now.
-When the browser asks to open Claude, choose Cancel and copy the claude:// link instead.
-Waiting for a claude:// link on the clipboard (5 min, Ctrl-C to stop)...
-EOF
-  local url="" i
-  for i in {1..300}; do
-    url="$(pbpaste 2>/dev/null || true)"
-    if [[ "$url" == claude://* && "$url" != "$before" ]]; then break; fi
-    url=""; sleep 1
-  done
-  [[ -n "$url" ]] || die "timed out waiting for a claude:// link"
-  [[ "$url" != *[[:space:]]* ]] || { printf '' | pbcopy; die "clipboard link contains whitespace; refusing to send"; }
+  local limit=300
+  (( exclusive )) && limit=600
+  if (( exclusive )); then
+    info "Sign in from the '$name' window now (any method). Waiting up to $(( limit / 60 )) min..."
+  else
+    info "Sign in from the '$name' window now using \"Continue with email\" — it works while other Claude windows are open."
+    info "Google sign-in would land in your normal Claude window; for that, run: meowlti login $name --exclusive"
+    info "Waiting up to $(( limit / 60 )) min..."
+  fi
 
-  # Re-check the target right before handing it a one-time auth code.
-  pid="$(find_pid "$exe" "$data")"; [[ -n "$pid" ]] || { printf '' | pbcopy; die "'$name' window closed"; }
-  verify_pid "$pid" "$exe" "$team"
-  local out; out="$(send_event url "$pid" "$url")"
-  printf '' | pbcopy   # don't leave the auth code on the clipboard
-  [[ "$out" == ok ]] || die "failed to deliver the link: ${out#error: }"
-  info "Login link delivered to '$name' (PID $pid). Clipboard cleared."
+  local before; before="$(pbpaste 2>/dev/null || true)"
+  local result=timeout url i
+  for i in {1..$limit}; do
+    if desktop_signed_in "$d"; then result=signed-in; break; fi
+    url="$(pbpaste 2>/dev/null || true)"
+    if [[ "$url" == claude://* && "$url" != "$before" && "$url" != *[[:space:]]* ]]; then
+      # Re-check the target right before handing it a one-time auth code.
+      pid="$(find_pid "$exe" "$data")"
+      if [[ -n "$pid" ]] && verify_pid "$pid" "$exe" "$team" && [[ "$(send_event url "$pid" "$url")" == ok ]]; then
+        info "Relayed the claude:// link from the clipboard to '$name'."
+      fi
+      printf '' | pbcopy   # don't leave the auth code on the clipboard
+      before=""
+    fi
+    sleep 1
+  done
+
+  local -a failed=() done_=()
+  for nm in $reopen; do
+    if ( cmd_open "$nm" claude >/dev/null 2>&1 ); then done_+=("$nm"); else failed+=("$nm"); fi
+  done
+  (( ${#done_} )) && info "Reopened: ${(j:, :)done_}."
+  (( ${#failed} )) && info "WARNING: could not reopen ${(j:, :)failed} — run: ${(j: ; :)${failed/#/meowlti open }}"
+  [[ "$result" == signed-in ]] || die "'$name' did not sign in within $(( limit / 60 )) min${failed:+; still closed: ${(j:, :)failed}}"
+  info "'$name' is signed in."
+  (( ${#failed} == 0 )) || die "'$name' is signed in, but could not reopen ${(j:, :)failed} — run: ${(j: ; :)${failed/#/meowlti open }}"
 }
 
 cmd_cli() {
@@ -598,7 +707,7 @@ cmd_statusline() {
   if [[ -n "$name" && -d "$PROFILES/$name" ]]; then
     local d="$PROFILES/$name" label email uuid
     label="$(profile_label "$d")"
-    IFS=$'\t' read -r email uuid <<< "$(account_info "$d")"
+    IFS=$'\t' read -r email uuid differ <<< "$(account_info "$d")"
     tag="${label:-$name}"
     [[ "$email" != - ]] && tag+=" · $email"
   fi

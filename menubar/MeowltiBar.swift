@@ -17,6 +17,8 @@ struct Profile: Identifiable, Equatable {
     let codexRunning: Bool
     let codexCLILoggedIn: Bool
     let label: String?
+    /// The CLI / Code tab account differs from the desktop login (one profile mixing two accounts).
+    let accountsDiffer: Bool
     var id: String { name }
     /// "default" is the user's normal Claude/Codex (no profile folder); only open/quit/login apply.
     var isDefault: Bool { name == "default" }
@@ -110,7 +112,8 @@ enum Meowlti {
                            claudeRunning: c[2] == "running",
                            codexRunning: c[3] == "running",
                            codexCLILoggedIn: c[4] == "yes",
-                           label: c[5].isEmpty ? nil : c[5])
+                           label: c[5].isEmpty ? nil : c[5],
+                           accountsDiffer: c.count > 8 && c[8] == "yes")
         }
     }
 
@@ -156,6 +159,7 @@ final class Store: ObservableObject {
     @Published var selection: String?
     @Published var busy: Set<String> = []          // profile names with a command in flight
     @Published var loginWaiting: Set<String> = []
+    @Published var loginExclusive: Set<String> = []   // waiting with the other Claude windows closed
     @Published var notice: (text: String, isError: Bool)?
     @Published var claudeShares: [ShareItem] = []
     @Published var codexShares: [ShareItem] = []
@@ -287,24 +291,31 @@ final class Store: ObservableObject {
         }
     }
 
-    func startLogin(_ name: String) {
+    /// Wait for the profile's window to sign in. `exclusive` closes the other Claude windows meanwhile
+    /// (needed for Google sign-in, whose claude:// return link otherwise goes to the normal window).
+    func startLogin(_ name: String, exclusive: Bool = false) {
         guard loginProcesses[name] == nil else { return }
-        let (process, pipe) = Meowlti.makeProcess(["login", name])
+        let (process, pipe) = Meowlti.makeProcess(["login", name] + (exclusive ? ["--exclusive"] : []))
         do { try process.run() } catch {
             notice = ("로그인 대기를 시작하지 못했습니다: \(error.localizedDescription)", true)
             return
         }
         loginProcesses[name] = process
         loginWaiting.insert(name)
+        if exclusive { loginExclusive.insert(name) }
         Task.detached {
             let result = Meowlti.wait(process, pipe)
             await MainActor.run {
                 let cancelled = self.loginProcesses[name] == nil
                 self.loginProcesses[name] = nil
                 self.loginWaiting.remove(name)
+                self.loginExclusive.remove(name)
                 if cancelled { return }
+                let reopened = result.output.contains("Reopened") ? " 잠시 닫았던 Claude 창들도 다시 열었습니다." : ""
                 self.notice = result.ok
-                    ? ("'\(name)' 창으로 로그인 링크를 전달했습니다. 클립보드는 비웠습니다.", false)
+                    ? (result.output.contains("already signed in")
+                        ? ("'\(name)'은(는) 이미 로그인되어 있습니다. 다른 계정으로 바꾸려면 그 창에서 먼저 로그아웃하세요.", false)
+                        : ("'\(name)' 로그인을 확인했습니다.\(reopened)", false))
                     : (result.message, true)
                 self.refresh()
             }
@@ -313,8 +324,10 @@ final class Store: ObservableObject {
 
     func cancelLogin(_ name: String) {
         guard let p = loginProcesses.removeValue(forKey: name) else { return }
-        p.terminate()
+        // Interrupt (not kill) so an --exclusive login still reopens the windows it closed.
+        p.interrupt()
         loginWaiting.remove(name)
+        loginExclusive.remove(name)
     }
 
     func addProfile(name: String, label: String, openAfter: Bool) {
@@ -362,7 +375,7 @@ struct ManagerView: View {
                         StatusDot(on: p.claudeRunning || p.codexRunning)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(p.displayName).fontWeight(.medium)
-                            Text(p.accountSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            Text((p.accountsDiffer ? "⚠ " : "") + p.accountSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
                         }
                     }
                     .tag(p.name)
@@ -458,6 +471,12 @@ struct ProfileDetail: View {
                         if profile.email == nil && profile.desktopSignedIn {
                             Text("이메일은 이 프로필에서 Code 탭을 한 번 쓰면 표시됩니다")
                                 .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if profile.accountsDiffer {
+                            Label("CLI·Code 탭 계정이 데스크톱 로그인과 다릅니다. 한 프로필에 계정이 섞여 세션·메모리가 공유됩니다.",
+                                  systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                                .multilineTextAlignment(.trailing)
                         }
                     }
                 }
@@ -588,31 +607,38 @@ struct LoginRow: View {
     @ObservedObject var store: Store
     let name: String
     let waiting: Bool
-    @State private var showHelp = false
+    @State private var confirmExclusive = false
 
     var body: some View {
         if waiting {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     ProgressView().controlSize(.small)
-                    Text("로그인 링크를 기다리는 중… (최대 5분)").fontWeight(.medium)
+                    Text("로그인을 기다리는 중…").fontWeight(.medium)
                     Spacer()
                     Button("취소") { store.cancelLogin(name) }
                         .accessibilityIdentifier("login-cancel")
                 }
-                Text("브라우저가 'Claude 열기'를 물으면 취소를 누르고 claude:// 링크를 복사하세요. 복사하는 즉시 이 프로필 창에만 전달됩니다.")
+                Text(store.loginExclusive.contains(name)
+                     ? "다른 Claude 창은 잠시 닫혀 있습니다. 이 프로필 창에서 아무 방법으로나 로그인하세요. 끝나면 닫았던 창을 다시 엽니다 (최대 10분)."
+                     : "이 프로필 창에서 '이메일로 계속하기'로 로그인하세요. 로그인되면 자동으로 확인합니다 (최대 5분).")
                     .font(.caption).foregroundStyle(.secondary)
             }
         } else {
-            HStack {
-                Button("로그인 링크 전달…") { store.startLogin(name) }
-                    .accessibilityIdentifier("login-relay")
-                Button { showHelp.toggle() } label: { Image(systemName: "questionmark.circle") }
-                    .buttonStyle(.borderless)
-                    .popover(isPresented: $showHelp) {
-                        Text("로그인 링크(claude://)는 macOS가 먼저 켜진 Claude 창으로 보냅니다. 이 버튼을 누른 뒤 링크를 복사하면, 메인 창을 끄지 않고 이 프로필 창에만 전달합니다.")
-                            .padding().frame(width: 280)
-                    }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Button("로그인 시작") { store.startLogin(name) }
+                        .accessibilityIdentifier("login-start")
+                    Button("Google로 로그인…") { confirmExclusive = true }
+                        .accessibilityIdentifier("login-exclusive")
+                }
+                Text("이메일 로그인은 다른 창을 그대로 둔 채 할 수 있습니다. Google 로그인은 돌아오는 링크가 평소 쓰는 Claude 창으로 가서, 로그인하는 동안 다른 Claude 창을 잠시 닫습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .confirmationDialog("다른 Claude 창을 잠시 닫고 로그인할까요?", isPresented: $confirmExclusive) {
+                Button("닫고 로그인") { store.startLogin(name, exclusive: true) }
+            } message: {
+                Text("평소 쓰는 Claude와 다른 프로필 창을 정상 종료한 뒤 이 프로필 창만 띄웁니다. 로그인이 끝나면 닫았던 창을 다시 엽니다. 진행 중인 Code 세션은 저장된 상태로 다시 이어집니다.")
             }
         }
     }
@@ -867,16 +893,37 @@ struct AddProfileSheet: View {
 // MARK: - App
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, @MainActor SPUStandardUserDriverDelegate {
     private var statusItem: NSStatusItem!
     private let menu = NSMenu()
     let store = Store()
     private var window: NSWindow?
     /// Sparkle checks GitHub releases for a newer signed build. Only builds that carry the update
     /// signing key (release builds) start it; local development builds leave it off.
-    let updaterController = SPUStandardUpdaterController(
+    lazy var updaterController = SPUStandardUpdaterController(
         startingUpdater: Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil,
-        updaterDelegate: nil, userDriverDelegate: nil)
+        updaterDelegate: nil, userDriverDelegate: self)
+
+    // Gentle reminders: as a menu bar app with no Dock icon, an update window found by a
+    // scheduled check could sit unnoticed behind other windows. While Sparkle shows an update,
+    // join the Dock and come forward (with a badge if the user did not ask), then go back.
+    var supportsGentleScheduledUpdateReminders: Bool { true }
+
+    func standardUserDriverWillHandleShowingUpdate(_ handleShowingUpdate: Bool, forUpdate update: SUAppcastItem,
+                                                   state: SPUUserUpdateState) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if !state.userInitiated { NSApp.dockTile.badgeLabel = "1" }
+    }
+
+    func standardUserDriverDidReceiveUserAttention(forUpdate update: SUAppcastItem) {
+        NSApp.dockTile.badgeLabel = ""
+    }
+
+    func standardUserDriverWillFinishUpdateSession() {
+        NSApp.dockTile.badgeLabel = ""
+        NSApp.setActivationPolicy(.accessory)
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = AppIcon.image
@@ -890,7 +937,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
+        _ = updaterController   // starts Sparkle (release builds only)
         if CommandLine.arguments.contains("--show") { showManager() }
+        // `--check-updates`: same as choosing 업데이트 확인… (useful for diagnosing updates).
+        if CommandLine.arguments.contains("--check-updates"),
+           Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.updaterController.checkForUpdates(nil) }
+        }
     }
 
     // Opening the app again from Finder/Spotlight shows the management window.

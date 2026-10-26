@@ -75,6 +75,8 @@ Your existing setup (`~/.claude`, `~/.codex`, and the apps you launch normally) 
 
 The desktop login and the CLI login are separate: sign in once in the profile's desktop window and,
 if you use the CLI, once with `meowlti claude <name> auth login` (Codex: `meowlti codex <name> login`).
+Use the same account for both — otherwise one profile mixes two accounts (shared sessions and memory),
+which `meowlti ls` and MeowltiBar flag with ⚠.
 
 ## Commands
 
@@ -96,7 +98,7 @@ Profile names use lowercase letters, digits and `-` (max 32 characters).
 |---|---|
 | `meowlti open <name> [claude\|codex]` | Launch the desktop app for the profile, or bring its window to the front |
 | `meowlti quit <name> [claude\|codex]` | Quit only that profile's window (graceful, like ⌘Q) |
-| `meowlti login <name>` | Deliver a `claude://` login link to that profile's window (see below) |
+| `meowlti login <name> [--exclusive]` | Open the profile's window for sign-in and wait until it is signed in (see below) |
 
 **Your normal Claude.** `default` means your usual setup — the apps started without a profile,
 `~/.claude` and `~/.codex`. While profile windows are open, clicking Claude in the Dock may just raise one of
@@ -104,11 +106,12 @@ them, for example after your main Claude quit or crashed. `meowlti open default`
 launcher, made with `meowlti launcher default`) always opens or raises your normal Claude.
 `default` works with `open`, `quit`, `login` and `ls`.
 
-**Signing in to a desktop profile.** macOS sends the `claude://` link at the end of a browser sign-in to whichever
-Claude window started first — usually your main one. Run `meowlti login <name>`, sign in from the profile's window,
-and when the browser asks to open Claude choose **Cancel** and copy the `claude://` link instead. meowlti hands the
-link to that profile's window only (after checking the app's code signature) and clears the clipboard.
-Alternatively, quit your other Claude windows while you sign in.
+**Signing in to a desktop profile.** Use **Continue with email** in the profile's window: it works while your
+other Claude windows stay open. Google sign-in returns to the app through a `claude://` link, and macOS hands that
+link to the Claude window that started first (usually your normal one), not to the profile. For Google, run
+`meowlti login <name> --exclusive` (or MeowltiBar › Google로 로그인…): it quits your other Claude windows, waits
+while you sign in to the profile, and reopens them. Run it from Terminal or MeowltiBar, not from a Claude
+window's Code tab. Each exclusive sign-in is logged in `~/.meowlti/logs/`.
 
 ### CLIs
 
@@ -187,7 +190,8 @@ meowlti --json ls
   the Code tab's local session files). These are not documented interfaces; an app update can break them.
 - Codex desktop profiles are experimental.
 - Profiles are ordinary folders, not a security boundary. Anyone with access to your user account can read them.
-- `meowlti login` reads the clipboard while it waits for the link and clears it afterwards.
+- While `meowlti login` waits, a `claude://` link copied to the clipboard is relayed to the profile's window
+  and the clipboard is cleared (browsers usually don't let you copy that link, so email or `--exclusive` is the normal path).
 
 ## Uninstall
 
