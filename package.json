@@ -1,6 +1,6 @@
 {
   "name": "meowlti",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Run multiple Claude and Codex accounts side by side on one Mac — desktop apps and CLIs",
   "keywords": [
     "claude",

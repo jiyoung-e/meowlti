@@ -14,7 +14,7 @@
 emulate -L zsh
 setopt err_return no_unset pipe_fail extended_glob
 
-MEOWLTI_VERSION=0.1.0
+MEOWLTI_VERSION=0.1.1
 MEOWLTI_HOME="${MEOWLTI_HOME:-$HOME/.meowlti}"
 PROFILES="$MEOWLTI_HOME/profiles"
 SELF="${0:A}"
