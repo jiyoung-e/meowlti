@@ -15,6 +15,9 @@ class Meowlti < Formula
     <<~EOS
       To let plain `claude` / `codex` use the profile bound to the current folder:
         meowlti shell-init --install
+
+      The menu bar app is a separate cask:
+        brew install --cask jiyoung-e/tap/meowltibar
     EOS
   end
 

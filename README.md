@@ -23,6 +23,15 @@ meowlti bind work ~/company # plain `claude` / `codex` inside ~/company now use 
 
 ## Install
 
+### Homebrew (CLI + menu bar app)
+
+```sh
+brew install jiyoung-e/tap/meowlti jiyoung-e/tap/meowltibar
+```
+
+Name both: Homebrew trusts only the third-party formulae and casks you name, so installing the app alone
+stops at its `meowlti` dependency. For just the CLI, `brew install jiyoung-e/tap/meowlti`.
+
 ### CLI
 
 npm:
@@ -34,19 +43,19 @@ npm install -g meowlti
 Straight from GitHub (pick a release tag):
 
 ```sh
-npm install -g github:jiyoung-e/meowlti#v0.1.0
+npm install -g github:jiyoung-e/meowlti#v0.1.1
 ```
 
 Or download the single script and put it on your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.0/meowlti -o ~/.local/bin/meowlti && chmod +x ~/.local/bin/meowlti
+curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.1/meowlti -o ~/.local/bin/meowlti && chmod +x ~/.local/bin/meowlti
 ```
 
 ### Menu bar app (MeowltiBar)
 
-Download `MeowltiBar-<version>.zip` from [Releases](https://github.com/jiyoung-e/meowlti/releases),
-unzip it and move `MeowltiBar.app` to `/Applications`. It is signed and notarized, and needs the `meowlti`
+With Homebrew, see above. Otherwise download `MeowltiBar-<version>.zip` from
+[Releases](https://github.com/jiyoung-e/meowlti/releases), unzip it and move `MeowltiBar.app` to `/Applications`. It is signed and notarized, and needs the `meowlti`
 CLI on your `PATH`.
 
 From 0.1.1 on, MeowltiBar updates itself with [Sparkle](https://sparkle-project.org): it looks at this

@@ -4,6 +4,8 @@
 #   scripts/release.sh publish <version>  after the v<version> tag is pushed: npm publish as NPM_USER only
 #   scripts/release.sh formula <version>  after the v<version> tag is on GitHub: write the Homebrew formula
 #                                          (Formula/meowlti.rb for the jiyoung-e/homebrew-tap repo)
+#   scripts/release.sh cask <version>     after MeowltiBar-<version>.zip is on the GitHub release: write the
+#                                          Homebrew cask (Casks/meowltibar.rb for the same tap repo)
 emulate -L zsh
 setopt err_exit no_unset pipe_fail
 
@@ -11,7 +13,7 @@ ROOT="${0:A:h:h}"
 REPO="jiyoung-e/meowlti"
 NPM_USER="jiyoung-e"   # publish only from this npm account
 cmd="${1:-}" version="${2:-}"
-[[ "$version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { print -u2 "usage: $0 bump|publish|formula <x.y.z>"; exit 1; }
+[[ "$version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || { print -u2 "usage: $0 bump|publish|formula|cask <x.y.z>"; exit 1; }
 
 case "$cmd" in
   bump)
@@ -48,5 +50,14 @@ case "$cmd" in
     "$ROOT/scripts/check-private.sh" dir "$tmp/src" || { rm -f "$out"; exit 1; }
     print "Wrote $out — copy it to Formula/meowlti.rb in github.com/jiyoung-e/homebrew-tap and push."
     ;;
-  *) print -u2 "usage: $0 bump|publish|formula <x.y.z>"; exit 1 ;;
+  cask)
+    url="https://github.com/$REPO/releases/download/v$version/MeowltiBar-$version.zip"
+    tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL "$url" -o "$tmp/app.zip" || { print -u2 "could not download $url (is the release uploaded?)"; exit 1; }
+    sha="$(shasum -a 256 "$tmp/app.zip" | cut -d' ' -f1)"
+    out="$ROOT/packaging/homebrew/meowltibar.rb"
+    sed -e "s|@VERSION@|$version|" -e "s|@SHA256@|$sha|" "$ROOT/packaging/homebrew/meowltibar.rb.in" > "$out"
+    print "Wrote $out — copy it to Casks/meowltibar.rb in github.com/jiyoung-e/homebrew-tap and push."
+    ;;
+  *) print -u2 "usage: $0 bump|publish|formula|cask <x.y.z>"; exit 1 ;;
 esac

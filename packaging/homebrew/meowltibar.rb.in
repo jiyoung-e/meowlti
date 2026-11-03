@@ -1,0 +1,27 @@
+cask "meowltibar" do
+  version "@VERSION@"
+  sha256 "@SHA256@"
+
+  url "https://github.com/jiyoung-e/meowlti/releases/download/v#{version}/MeowltiBar-#{version}.zip"
+  name "MeowltiBar"
+  desc "Menu bar app for running multiple Claude and Codex accounts side by side"
+  homepage "https://github.com/jiyoung-e/meowlti"
+
+  livecheck do
+    url "https://github.com/jiyoung-e/meowlti/releases/latest/download/appcast.xml"
+    strategy :sparkle
+  end
+
+  auto_updates true
+  depends_on formula: "jiyoung-e/tap/meowlti"
+  depends_on macos: :sonoma
+
+  app "MeowltiBar.app"
+
+  # Only the app's own settings; profiles in ~/.meowlti belong to the meowlti CLI.
+  zap trash: [
+    "~/Library/Caches/io.github.jiyoung-e.meowltibar",
+    "~/Library/HTTPStorages/io.github.jiyoung-e.meowltibar",
+    "~/Library/Preferences/io.github.jiyoung-e.meowltibar.plist",
+  ]
+end

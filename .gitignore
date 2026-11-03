@@ -4,3 +4,4 @@ node_modules/
 .DS_Store
 menubar/vendor/
 packaging/homebrew/meowlti.rb
+packaging/homebrew/meowltibar.rb
