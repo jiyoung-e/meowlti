@@ -57,13 +57,46 @@ struct CommandResult {
 }
 
 enum Meowlti {
-    static let executable: String = {
+    // Looked up again until found, so installing the CLI while the app is running works without a restart.
+    private static var found: String?
+    private static var lastShellLookup = Date.distantPast
+    private static let lookupLock = NSLock()
+
+    static var executable: String {
+        lookupLock.lock(); defer { lookupLock.unlock() }
+        if let found, FileManager.default.isExecutableFile(atPath: found) { return found }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         // Homebrew (Apple silicon / Intel), npm global prefixes, then a source checkout.
         let candidates = ["/opt/homebrew/bin/meowlti", "/usr/local/bin/meowlti", "\(home)/.local/bin/meowlti",
                           "\(home)/.npm-global/bin/meowlti", "\(home)/meowlti/meowlti"]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
-    }()
+        found = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        // The shell can take seconds: never on the main thread (menu opening), and at most every 30 s.
+        if found == nil, !Thread.isMainThread, Date().timeIntervalSince(lastShellLookup) > 30 {
+            lastShellLookup = Date()
+            found = fromLoginShell()
+        }
+        return found ?? candidates[0]
+    }
+
+    /// Apps don't get the shell's PATH, so ask the user's login shell (nvm, custom Homebrew/npm prefixes).
+    private static func fromLoginShell() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
+        process.arguments = ["-ilc", "command -v meowlti"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return nil }
+        // A shell profile that waits for input must not hang the app.
+        let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3, execute: timer)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        timer.cancel()
+        let lines = String(data: data, encoding: .utf8)?.split(separator: "\n").map(String.init) ?? []
+        return lines.reversed().first { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }
+    }
 
     static var home: String {
         ProcessInfo.processInfo.environment["MEOWLTI_HOME"]
