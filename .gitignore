@@ -1,4 +1,4 @@
-menubar/build/
+menubar/build.noindex/
 node_modules/
 *.tgz
 .DS_Store

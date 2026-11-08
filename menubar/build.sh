@@ -2,7 +2,7 @@
 # Build MeowltiBar.app.
 #   ./build.sh            local build for this Mac, ad-hoc signed, no auto-update (not for distribution)
 #   ./build.sh --release  universal build, Developer ID signed, notarized and stapled, Sparkle-enabled,
-#                         plus build/updates/MeowltiBar-<version>.zip and a signed appcast.xml
+#                         plus build.noindex/updates/MeowltiBar-<version>.zip and a signed appcast.xml
 # Release settings come from ~/.config/meowlti/signing.env (outside the repo):
 #   MEOWLTI_SIGN_IDENTITY="Developer ID Application: ... (TEAMID)"
 #   MEOWLTI_NOTARY_PROFILE="<profile saved with: xcrun notarytool store-credentials>"
@@ -19,7 +19,8 @@ SPARKLE_ACCOUNT=meowlti
 FEED_URL="https://github.com/$REPO/releases/latest/download/appcast.xml"
 VERSION="$(sed -n -E 's/^MEOWLTI_VERSION=([0-9.]+)$/\1/p' ../meowlti)"
 SPARKLE="$(./fetch-sparkle.sh)"
-APP=build/MeowltiBar.app
+OUT=build.noindex   # Spotlight skips *.noindex, so the build does not show up next to the installed app
+APP=$OUT/MeowltiBar.app
 FW="$APP/Contents/Frameworks/Sparkle.framework"
 
 if (( RELEASE )); then
@@ -45,9 +46,9 @@ swift_build() {   # swift_build <output> [target]
 }
 if (( RELEASE )); then
   # Universal binary: Apple silicon + Intel (Sparkle.framework is universal too).
-  for arch in arm64 x86_64; do swift_build "build/MeowltiBar-$arch" "$arch-apple-macos14"; done
-  lipo -create -output "$APP/Contents/MacOS/MeowltiBar" build/MeowltiBar-arm64 build/MeowltiBar-x86_64
-  rm -f build/MeowltiBar-arm64 build/MeowltiBar-x86_64
+  for arch in arm64 x86_64; do swift_build "$OUT/MeowltiBar-$arch" "$arch-apple-macos14"; done
+  lipo -create -output "$APP/Contents/MacOS/MeowltiBar" $OUT/MeowltiBar-arm64 $OUT/MeowltiBar-x86_64
+  rm -f $OUT/MeowltiBar-arm64 $OUT/MeowltiBar-x86_64
 else
   swift_build "$APP/Contents/MacOS/MeowltiBar"
 fi
@@ -57,7 +58,7 @@ ditto "$SPARKLE/Sparkle.framework" "$FW"
 rm -rf "$FW/Versions/B/XPCServices" "$FW/XPCServices"
 
 # App icon, rendered by the app itself so it matches the in-app icon.
-ICONSET=build/AppIcon.iconset
+ICONSET=$OUT/AppIcon.iconset
 rm -rf "$ICONSET"; mkdir -p "$ICONSET"
 "$APP/Contents/MacOS/MeowltiBar" --write-icon "$ICONSET"
 iconutil -c icns -o "$APP/Contents/Resources/AppIcon.icns" "$ICONSET"
@@ -103,7 +104,7 @@ sign "$FW/Versions/B/Autoupdate"
 sign "$FW/Versions/B/Updater.app"
 sign "$FW"
 # Apple Events are how meowlti talks to app windows.
-cat > build/entitlements.plist <<'PLIST'
+cat > $OUT/entitlements.plist <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -112,10 +113,10 @@ cat > build/entitlements.plist <<'PLIST'
 </dict>
 </plist>
 PLIST
-sign --entitlements build/entitlements.plist "$APP"
+sign --entitlements $OUT/entitlements.plist "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-UPD=build/updates
+UPD=$OUT/updates
 ZIP="$UPD/MeowltiBar-$VERSION.zip"
 rm -rf "$UPD"; mkdir -p "$UPD"
 ditto -c -k --keepParent "$APP" "$ZIP"
