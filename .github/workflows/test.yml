@@ -1,0 +1,24 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: CLI smoke tests
+        run: zsh test/smoke.sh
+      - name: Menu bar app builds
+        run: ./menubar/build.sh
+      - name: No personal information in the repository (generic checks; the personal list stays off GitHub)
+        env:
+          MEOWLTI_CHECK_QUIET: "1"
+        run: |
+          git archive HEAD | tar -x -C "$RUNNER_TEMP" && zsh scripts/check-private.sh dir "$RUNNER_TEMP"

@@ -7,6 +7,7 @@
 # Personal patterns (emails, account ids, names…) are read from a file OUTSIDE the repository —
 # by default ~/.config/meowlti/private-patterns, one case-insensitive extended regex per line —
 # so the list itself is never published. Generic checks below catch common leaks without it.
+# MEOWLTI_CHECK_QUIET=1 names the files but not the matching lines (for public CI logs).
 emulate -L zsh
 setopt no_unset pipe_fail
 
@@ -35,7 +36,11 @@ scan() {   # scan <label> ; text on stdin
   if [[ -n "$hits" ]]; then
     found=1
     print -u2 -- "check-private: possible personal information in $label:"
-    print -u2 -- "${hits//$'\n'/$'\n'  }" | sed 's/^/  /' >&2
+    if [[ -n "${MEOWLTI_CHECK_QUIET:-}" ]]; then
+      print -u2 -- "  (lines hidden; line numbers: ${(j:, :)${(f)hits}%%:*})"
+    else
+      print -u2 -- "${hits//$'\n'/$'\n'  }" | sed 's/^/  /' >&2
+    fi
   fi
 }
 
