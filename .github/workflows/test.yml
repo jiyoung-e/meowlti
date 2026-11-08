@@ -21,4 +21,5 @@ jobs:
         env:
           MEOWLTI_CHECK_QUIET: "1"
         run: |
-          git archive HEAD | tar -x -C "$RUNNER_TEMP" && zsh scripts/check-private.sh dir "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/repo" && git archive HEAD | tar -x -C "$RUNNER_TEMP/repo"
+          zsh scripts/check-private.sh dir "$RUNNER_TEMP/repo"
