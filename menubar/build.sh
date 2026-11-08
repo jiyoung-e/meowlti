@@ -3,6 +3,7 @@
 #   ./build.sh            local build for this Mac, ad-hoc signed, no auto-update (not for distribution)
 #   ./build.sh --release  universal build, Developer ID signed, notarized and stapled, Sparkle-enabled,
 #                         plus build.noindex/updates/MeowltiBar-<version>.zip and a signed appcast.xml
+#                         whose entry shows release-notes/<version>.md in the update window
 # Release settings come from ~/.config/meowlti/signing.env (outside the repo):
 #   MEOWLTI_SIGN_IDENTITY="Developer ID Application: ... (TEAMID)"
 #   MEOWLTI_NOTARY_PROFILE="<profile saved with: xcrun notarytool store-credentials>"
@@ -23,7 +24,9 @@ OUT=build.noindex   # Spotlight skips *.noindex, so the build does not show up n
 APP=$OUT/MeowltiBar.app
 FW="$APP/Contents/Frameworks/Sparkle.framework"
 
+NOTES="../release-notes/$VERSION.md"
 if (( RELEASE )); then
+  [[ -s "$NOTES" ]] || { echo "write $NOTES first (shown in the update window and on the GitHub release)" >&2; exit 1; }
   [[ -s sparkle-public-key.txt ]] || { echo "sparkle-public-key.txt is missing — run scripts/setup-dev.sh on the release Mac" >&2; exit 1; }
   CONF="$HOME/.config/meowlti/signing.env"
   [[ -f "$CONF" ]] && source "$CONF"
@@ -129,7 +132,9 @@ ditto -c -k --keepParent "$APP" "$ZIP"
 spctl --assess --type execute --verbose=2 "$APP"
 
 # Signed update feed: generate_appcast signs the zip with the Sparkle key from this Mac's keychain.
-"$SPARKLE/bin/generate_appcast" --account "$SPARKLE_ACCOUNT" \
+# A .md next to the zip becomes the entry's release notes; embedded, so there is no extra file to upload.
+cp "$NOTES" "$UPD/MeowltiBar-$VERSION.md"
+"$SPARKLE/bin/generate_appcast" --account "$SPARKLE_ACCOUNT" --embed-release-notes \
   --download-url-prefix "https://github.com/$REPO/releases/download/v$VERSION/" \
   --link "https://github.com/$REPO" -o "$UPD/appcast.xml" "$UPD"
 grep -q 'sparkle:edSignature' "$UPD/appcast.xml" || { echo "appcast.xml has no EdDSA signature" >&2; exit 1; }
