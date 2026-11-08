@@ -43,13 +43,13 @@ npm install -g meowlti
 Straight from GitHub (pick a release tag):
 
 ```sh
-npm install -g github:jiyoung-e/meowlti#v0.1.1
+npm install -g github:jiyoung-e/meowlti#v0.1.2
 ```
 
 Or download the single script and put it on your `PATH`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.1/meowlti -o ~/.local/bin/meowlti && chmod +x ~/.local/bin/meowlti
+curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.2/meowlti -o ~/.local/bin/meowlti && chmod +x ~/.local/bin/meowlti
 ```
 
 ### Menu bar app (MeowltiBar)
@@ -218,9 +218,14 @@ zsh test/smoke.sh          # uses a temporary MEOWLTI_HOME and fake claude/codex
 menubar/build.sh           # local MeowltiBar build (ad-hoc signed, no updater)
 ```
 
-Releases (on the Mac that holds the signing keys): `scripts/release.sh bump <version>`, commit and tag,
-`menubar/build.sh --release` (signed, notarized app + Sparkle `appcast.xml`), upload both to the GitHub
-release, then `scripts/release.sh publish <version>` for npm.
+Releases (on the Mac that holds the signing keys):
+
+1. `scripts/release.sh bump <version>` and write `release-notes/<version>.md` (shown in MeowltiBar's
+   update window and on the GitHub release); commit, tag `v<version>`, push the commit and the tag.
+2. The tag push stages the version on npm through trusted publishing (`.github/workflows/publish.yml`);
+   approve it with 2FA: `npm stage approve <id>` or npmjs.com › Staged Packages.
+3. `scripts/release.sh ship <version>`: signed, notarized app + Sparkle `appcast.xml`, the GitHub release,
+   and the Homebrew formula and cask pushed to the tap. It asks before each step that publishes.
 
 ## License
 

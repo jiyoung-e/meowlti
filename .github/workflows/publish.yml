@@ -1,0 +1,39 @@
+# Pushing a v<version> tag stages that version on npm through trusted publishing (no token).
+# It goes live only after a maintainer approves it with 2FA: npm stage approve <id>, or npmjs.com.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write   # OIDC token for npm trusted publishing
+
+jobs:
+  npm:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: npm 11.15+ (staged publishing)
+        run: npm install -g npm@latest && npm --version
+      - name: Tag, package.json and meowlti agree
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          test "$(node -p "require('./package.json').version")" = "$v"
+          test "$(./meowlti --version)" = "meowlti $v"
+      - name: Smoke tests
+        run: zsh test/smoke.sh
+      - name: No personal information in the package
+        env:
+          MEOWLTI_CHECK_QUIET: "1"
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/pkg" && tar -xzf "$RUNNER_TEMP"/meowlti-*.tgz -C "$RUNNER_TEMP/pkg"
+          zsh scripts/check-private.sh dir "$RUNNER_TEMP/pkg/package"
+      - name: Stage on npm
+        run: npm stage publish --access public
