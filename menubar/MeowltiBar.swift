@@ -6,6 +6,7 @@
 import AppKit
 import SwiftUI
 import Sparkle
+import ServiceManagement
 
 // MARK: - CLI bridge
 
@@ -1021,6 +1022,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         manage.keyEquivalent = ","
         menu.addItem(manage)
         menu.addItem(.separator())
+        let login = item("로그인 시 열기", #selector(toggleLaunchAtLogin))
+        login.state = LaunchAtLogin.isOn ? .on : .off
+        menu.addItem(login)
         if Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil {
             let update = NSMenuItem(title: "업데이트 확인…", action: #selector(SPUStandardUpdaterController.checkForUpdates(_:)),
                                     keyEquivalent: "")
@@ -1088,7 +1092,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func windowWillClose(_ notification: Notification) { store.stopAutoRefresh() }
 
+    @objc private func toggleLaunchAtLogin() {
+        if let error = LaunchAtLogin.set(!LaunchAtLogin.isOn) {
+            let alert = NSAlert()
+            alert.messageText = "로그인 시 열기를 바꾸지 못했습니다"
+            alert.informativeText = error
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+    }
+
     @objc private func quitApp() { NSApp.terminate(nil) }
+}
+
+// MARK: - Login item
+
+/// Opening at login, through the system's login items (System Settings › General › Login Items).
+/// The state is always read from the system, since the user can turn it off there.
+enum LaunchAtLogin {
+    static var isOn: Bool { SMAppService.mainApp.status == .enabled }
+
+    /// Returns an error message, or nil.
+    static func set(_ on: Bool) -> String? {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            return error.localizedDescription
+        }
+        if on, SMAppService.mainApp.status == .requiresApproval {
+            SMAppService.openSystemSettingsLoginItems()
+            return "시스템 설정 › 일반 › 로그인 항목에서 MeowltiBar를 허용해 주세요."
+        }
+        return nil
+    }
 }
 
 // The app icon (alerts, Finder): the menu bar cat on a rounded tile.
