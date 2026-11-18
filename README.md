@@ -55,8 +55,10 @@ curl -fsSL https://raw.githubusercontent.com/jiyoung-e/meowlti/v0.1.2/meowlti -o
 ### Menu bar app (MeowltiBar)
 
 With Homebrew, see above. Otherwise download `MeowltiBar-<version>.zip` from
-[Releases](https://github.com/jiyoung-e/meowlti/releases), unzip it and move `MeowltiBar.app` to `/Applications`. It is signed and notarized, and needs the `meowlti`
-CLI on your `PATH`.
+[Releases](https://github.com/jiyoung-e/meowlti/releases), unzip it and open it; from 0.1.3 on it offers to move itself to
+`/Applications` (it has to be there to show up in Spotlight and to update itself). It is signed and notarized, and needs
+the `meowlti` CLI on your `PATH`. To start it when you log in, choose **로그인 시 열기** in its menu (off by default;
+also listed in System Settings › General › Login Items).
 
 From 0.1.1 on, MeowltiBar updates itself with [Sparkle](https://sparkle-project.org): it looks at this
 repository's latest release for a newer version (it asks before checking automatically) and you can use

@@ -971,6 +971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.delegate = self
         menu.autoenablesItems = false
         statusItem.menu = menu
+        if Installer.offerMoveIfNeeded() { return }   // relaunching from /Applications
         _ = updaterController   // starts Sparkle (release builds only)
         if CommandLine.arguments.contains("--show") { showManager() }
         // `--check-updates`: same as choosing 업데이트 확인… (useful for diagnosing updates).
@@ -1105,7 +1106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc private func quitApp() { NSApp.terminate(nil) }
 }
 
-// MARK: - Login item
+// MARK: - Install location and login item
 
 /// Opening at login, through the system's login items (System Settings › General › Login Items).
 /// The state is always read from the system, since the user can turn it off there.
@@ -1124,6 +1125,78 @@ enum LaunchAtLogin {
             return "시스템 설정 › 일반 › 로그인 항목에서 MeowltiBar를 허용해 주세요."
         }
         return nil
+    }
+}
+
+/// A downloaded zip runs wherever it was unzipped — often from a read-only random path macOS uses for
+/// quarantined apps (App Translocation), where updates cannot be installed. Offer to move to /Applications.
+enum Installer {
+    private static let declinedKey = "declinedMoveToApplications"
+
+    /// true when the app is about to quit and reopen from /Applications.
+    @MainActor static func offerMoveIfNeeded() -> Bool {
+        let here = Bundle.main.bundleURL
+        // For testing: `--offer-move <folder>` asks even for a development build and moves into <folder>.
+        let args = CommandLine.arguments
+        let forcedDir = args.firstIndex(of: "--offer-move").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        let forced = forcedDir != nil
+        // Development builds (no update key) run from the build folder on purpose.
+        guard forced || Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") != nil else { return false }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if !forced && (here.path.hasPrefix("/Applications/") || here.path.hasPrefix("\(home)/Applications/")) { return false }
+        if !forced && UserDefaults.standard.bool(forKey: declinedKey) { return false }
+
+        let dest = URL(fileURLWithPath: forcedDir ?? "/Applications").appendingPathComponent(here.lastPathComponent)
+        let alert = NSAlert()
+        alert.messageText = "MeowltiBar를 응용 프로그램 폴더로 옮길까요?"
+        alert.informativeText = "응용 프로그램 폴더에 있어야 Spotlight에서 찾을 수 있고, 업데이트와 로그인 시 열기가 제대로 동작합니다."
+        alert.addButton(withTitle: "옮기기")
+        alert.addButton(withTitle: "그대로 두기")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "다시 묻지 않기"
+        NSApp.activate(ignoringOtherApps: true)
+        let answer = alert.runModal()
+        if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: declinedKey) }
+        guard answer == .alertFirstButtonReturn else { return false }
+
+        do {
+            try move(from: here, to: dest)
+        } catch {
+            let fail = NSAlert()
+            fail.messageText = "옮기지 못했습니다"
+            fail.informativeText = "\(error.localizedDescription)\n\nFinder에서 MeowltiBar를 응용 프로그램 폴더로 끌어다 놓아 주세요."
+            fail.runModal()
+            return false
+        }
+        relaunch(dest)
+        return true
+    }
+
+    private static func move(from src: URL, to dest: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dest.path) {
+            // An older copy (e.g. one that is running) goes to the Trash rather than being deleted.
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            where app.bundleURL?.standardizedFileURL == dest.standardizedFileURL { app.terminate() }
+            try fm.trashItem(at: dest, resultingItemURL: nil)
+        }
+        try fm.copyItem(at: src, to: dest)
+        // The copy would still be quarantined and translocated again; it already passed Gatekeeper here.
+        let x = Process()
+        x.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        x.arguments = ["-dr", "com.apple.quarantine", dest.path]
+        try? x.run(); x.waitUntilExit()
+        // A translocated original is a read-only mirror; the user's own copy (e.g. in Downloads) stays.
+        if !src.path.contains("/AppTranslocation/") { try? fm.trashItem(at: src, resultingItemURL: nil) }
+    }
+
+    @MainActor private static func relaunch(_ app: URL) {
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+        sh.arguments = ["-c", "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"$0\"", app.path]
+        try? sh.run()
+        NSApp.terminate(nil)
     }
 }
 
