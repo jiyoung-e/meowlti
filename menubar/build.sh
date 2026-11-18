@@ -1,6 +1,8 @@
 #!/bin/zsh
 # Build MeowltiBar.app.
-#   ./build.sh            local build for this Mac, ad-hoc signed, no auto-update (not for distribution)
+#   ./build.sh            local build for this Mac, no auto-update (not for distribution); signed with
+#                         MEOWLTI_DEV_SIGN_IDENTITY, else MEOWLTI_SIGN_IDENTITY, else an Apple Development
+#                         certificate, else ad-hoc
 #   ./build.sh --release  universal build, Developer ID signed, notarized and stapled, Sparkle-enabled,
 #                         plus build.noindex/updates/MeowltiBar-<version>.zip and a signed appcast.xml
 #                         whose entry shows release-notes/<version>.md in the update window
@@ -94,9 +96,20 @@ PLIST
 plutil -lint -s "$APP/Contents/Info.plist"
 
 if (( ! RELEASE )); then
-  # Ad-hoc signatures: enough to run on this Mac (no hardened runtime, so the framework loads).
-  codesign --force --sign - "$FW"
-  codesign --force --sign - "$APP"
+  # Sign with a stable identity: macOS remembers Automation (Apple Events) permission and the login item
+  # by the app's signature, and an ad-hoc one changes with every build. No hardened runtime here, so the
+  # framework loads without matching team checks. Ad-hoc only when this Mac has no certificate (CI).
+  CONF="$HOME/.config/meowlti/signing.env"
+  [[ -f "$CONF" ]] && source "$CONF"
+  DEV_ID="${MEOWLTI_DEV_SIGN_IDENTITY:-${MEOWLTI_SIGN_IDENTITY:-}}"
+  [[ -n "$DEV_ID" ]] || DEV_ID="$(security find-identity -v -p codesigning 2>/dev/null \
+    | sed -n -E 's/.*"(Apple Development: [^"]+)".*/\1/p' | head -1)"
+  if [[ -z "$DEV_ID" ]]; then
+    echo "note: no signing certificate, signing ad-hoc — macOS may ask for Automation permission again after each build" >&2
+    DEV_ID=-
+  fi
+  codesign --force --sign "$DEV_ID" "$FW"
+  codesign --force --sign "$DEV_ID" "$APP"
   echo "Built $PWD/$APP"
   exit 0
 fi
